@@ -1,0 +1,3 @@
+# 运行时无第三方依赖（纯标准库 + ctypes）
+# 仅打包 exe 时需要：
+pyinstaller>=6.0

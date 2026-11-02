@@ -1,0 +1,119 @@
+# 盯盘小窗 · 加密中转服务：构建 Docker 镜像 → 推送到 GHCR → SSH 部署到服务器
+#
+# 需要在仓库 Settings → Secrets and variables → Actions 中配置：
+#   Secrets（必填）：SERVER_HOST      服务器公网 IP（建议用 IP，不要用域名）
+#                    SERVER_USER      SSH 用户名（需能执行 docker）
+#                    SERVER_SSH_KEY   SSH 私钥（对应公钥已加入服务器 ~/.ssh/authorized_keys）
+#   Secrets（可选）：SERVER_SSH_PORT  SSH 端口，默认 22
+#                    SERVER_SSH_FINGERPRINT  服务器 SSH 主机密钥指纹（SHA256:…），防止连到冒充的服务器
+#   Variables（可选）：RELAY_PORT     服务器对外端口，默认 8443（记得在云服务器安全组放行）
+# 未配置 SERVER_HOST 时只构建镜像、不部署。
+name: relay
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "server/**"
+      - ".github/workflows/relay.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: relay-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 镜像名（GHCR 要求全小写）
+        id: meta
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "image=ghcr.io/${owner}/stock-relay" >> "$GITHUB_OUTPUT"
+
+      - name: 语法检查
+        run: python3 -m py_compile server/relay.py
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送（amd64 + arm64）
+        uses: docker/build-push-action@v6
+        with:
+          context: server
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read          # 交给服务器拉镜像的临时令牌只读，且仅在本次运行期间有效
+    env:
+      HAS_HOST: ${{ secrets.SERVER_HOST != '' }}
+    steps:
+      - name: 未配置服务器，跳过部署
+        if: env.HAS_HOST != 'true'
+        run: echo "未设置 SERVER_HOST，只构建了镜像。配置 Secrets 后重新运行即可部署。"
+
+      - name: SSH 部署
+        if: env.HAS_HOST == 'true'
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_REF: ${{ needs.build.outputs.image }}:${{ github.sha }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELAY_PORT: ${{ vars.RELAY_PORT || '8443' }}
+          RELAY_PUBLIC_HOST: ${{ secrets.SERVER_HOST }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_SSH_PORT || 22 }}
+          # 可选：服务器 SSH 主机密钥指纹（ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 得到的 SHA256:…），
+          # 配置后可防止部署时连到冒充的服务器
+          fingerprint: ${{ secrets.SERVER_SSH_FINGERPRINT }}
+          envs: IMAGE_REF,GHCR_USER,GHCR_TOKEN,RELAY_PORT,RELAY_PUBLIC_HOST
+          script: |
+            set -e
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            docker pull "$IMAGE_REF"
+            docker logout ghcr.io || true
+            docker rm -f stock-relay >/dev/null 2>&1 || true
+            docker run -d --name stock-relay --restart unless-stopped \
+              -p "${RELAY_PORT}:8443" \
+              -v stock-relay-data:/data \
+              -e RELAY_PUBLIC_HOST="$RELAY_PUBLIC_HOST" \
+              -e RELAY_PUBLIC_PORT="$RELAY_PORT" \
+              --read-only --tmpfs /tmp \
+              --cap-drop ALL --security-opt no-new-privileges \
+              --memory 128m --pids-limit 256 \
+              "$IMAGE_REF"
+            sleep 4
+            # 只输出运行状态；连接串含令牌，绝不打印到 Actions 日志
+            docker ps --filter name=stock-relay --format '容器状态：{{.Status}}'
+            docker logs stock-relay 2>&1 | grep -v 'swr://' | tail -n 5 || true
+            docker image prune -f >/dev/null 2>&1 || true
+            echo "部署完成。在服务器上执行以下命令获取连接串："
+            echo "  docker logs stock-relay 2>&1 | grep swr://"
