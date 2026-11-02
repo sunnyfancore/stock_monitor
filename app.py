@@ -160,6 +160,17 @@ def log(msg):
         pass
 
 
+def seal_plain_cache():
+    """启动时把旧的明文 cache.json 立即改成密文（不等下一次写缓存）"""
+    try:
+        with open(CACHE_PATH, "rb") as f:
+            raw = f.read()
+        if raw and not raw.startswith(SEAL_MAGIC):
+            write_sealed_json(CACHE_PATH, json.loads(raw.decode("utf-8")))
+    except (OSError, ValueError):
+        pass
+
+
 def seal_plain_logs():
     """把旧的明文日志行就地改成密文（启动时执行一次）"""
     for p in (LOG_PATH, LOG_PATH + ".old"):
@@ -3360,6 +3371,7 @@ def main():
         time.sleep(1.5)
     migrate_identity()
     seal_plain_logs()                              # 旧的明文日志改成密文
+    seal_plain_cache()                             # 旧的明文缓存改成密文（配置在加载时就会重写为密文）
     sys.excepthook = lambda t, v, tb: log("未捕获异常:\n" + "".join(
         traceback.format_exception(t, v, tb)))
     try:
