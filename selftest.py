@@ -3,6 +3,7 @@
 
 检查：源码语法 / 模块能否导入 / 代码规范化 / 开盘时间判断 / 搜索结果解析 / 实时行情接口 / 搜索接口
 用法：双击 selftest.bat，或 python selftest.py
+      python selftest.py --log    解密并显示本机日志（日志文件是加密的）
 """
 import datetime
 import os
@@ -136,6 +137,37 @@ def t_ca_bundle():
     return f"使用 {p}"
 
 
+def _unseal(raw):
+    """客户端本地文件是 DPAPI 密文（以 NM1 开头）；旧的明文文件原样返回"""
+    if raw.startswith(b"NM1"):
+        import winapi
+        dec = winapi.dpapi_decrypt(raw[3:])
+        if dec is None:
+            raise ValueError("无法解密")
+        return dec
+    return raw
+
+
+def show_log(lines=200):
+    """解密并打印本机日志（python selftest.py --log）"""
+    import base64
+    import winapi
+    path = os.path.join(os.environ.get("APPDATA", ""), "NetMonitor", "log.txt")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            rows = f.read().splitlines()[-lines:]
+    except OSError:
+        print("没有日志文件：" + path)
+        return 0
+    for row in rows:
+        if row.startswith("NM1:"):
+            dec = winapi.dpapi_decrypt(base64.b64decode(row[4:]))
+            print(dec.decode("utf-8", "replace") if dec else "（无法解密）")
+        elif row:
+            print(row)
+    return 0
+
+
 def _relay_settings():
     """读取客户端配置里的中转设置（DPAPI 解密，只在本机本用户下可用）"""
     import base64
@@ -145,8 +177,8 @@ def _relay_settings():
     if not os.path.exists(path):                     # 还没升级过的旧配置位置
         path = os.path.join(os.environ.get("APPDATA", ""), "StockWatcher", "stocks.json")
     try:
-        with open(path, encoding="utf-8") as f:
-            cfg = json.load(f)
+        with open(path, "rb") as f:
+            cfg = json.loads(_unseal(f.read()).decode("utf-8"))
     except (OSError, ValueError):
         return True, False, None   # 还没运行过程序（未选联网方式）：同样不做直连测试
     mode = cfg.get("net_mode", "relay" if cfg.get("relay_on") else "")
@@ -237,4 +269,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--log" in sys.argv:
+        sys.exit(show_log())
     sys.exit(main())

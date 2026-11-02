@@ -108,16 +108,77 @@ HK_BOSS, HK_DISGUISE = 1, 2
 
 
 # ================================================================ 基础设施
+# ---------------------------------------------------------------- 本地文件加密
+# config.json / cache.json 整个文件、log.txt 每一行，都用 DPAPI 按当前 Windows 用户加密：
+# 打开只能看到乱码，拷到别的电脑或换用户也解不开。读取时兼容旧的明文文件（下次写入即变为密文）。
+SEAL_MAGIC = b"NM1"
+LOG_MAGIC = "NM1:"
+LOG_PATH = os.path.join(CFG_DIR, "log.txt")
+
+
+def seal(data):
+    enc = W.dpapi_encrypt(data)
+    return SEAL_MAGIC + enc if enc else data      # DPAPI 不可用时只能明文保存
+
+
+def unseal(raw):
+    if raw.startswith(SEAL_MAGIC):
+        dec = W.dpapi_decrypt(raw[len(SEAL_MAGIC):])
+        if dec is None:
+            raise ValueError("无法解密（换了电脑或 Windows 用户）")
+        return dec
+    return raw                                     # 旧的明文文件
+
+
+def read_sealed_json(path):
+    with open(path, "rb") as f:
+        return json.loads(unseal(f.read()).decode("utf-8"))
+
+
+def write_sealed_json(path, obj):
+    """加密后原子写入：先写临时文件再替换，断电/崩溃不损坏"""
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(seal(json.dumps(obj, ensure_ascii=False).encode("utf-8")))
+    os.replace(tmp, path)
+
+
+def _seal_line(line):
+    enc = W.dpapi_encrypt(line.encode("utf-8"))
+    return LOG_MAGIC + base64.b64encode(enc).decode("ascii") if enc else line
+
+
 def log(msg):
     try:
         os.makedirs(CFG_DIR, exist_ok=True)
-        p = os.path.join(CFG_DIR, "log.txt")
-        if os.path.exists(p) and os.path.getsize(p) > 200 * 1024:
-            os.replace(p, p + ".old")
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(time.strftime("%m-%d %H:%M:%S ") + str(msg) + "\n")
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 200 * 1024:
+            os.replace(LOG_PATH, LOG_PATH + ".old")
+        line = _seal_line(time.strftime("%m-%d %H:%M:%S ") + str(msg))
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
     except OSError:
         pass
+
+
+def seal_plain_logs():
+    """把旧的明文日志行就地改成密文（启动时执行一次）"""
+    for p in (LOG_PATH, LOG_PATH + ".old"):
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        if all(ln.startswith(LOG_MAGIC) or not ln for ln in lines):
+            continue
+        try:
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                for ln in lines:
+                    if ln:
+                        f.write((ln if ln.startswith(LOG_MAGIC) else _seal_line(ln)) + "\n")
+            os.replace(tmp, p)
+        except OSError:
+            pass
 
 
 def load_cfg():
@@ -128,11 +189,13 @@ def load_cfg():
         except OSError:
             pass
     try:
-        with open(CFG_PATH, encoding="utf-8") as f:
-            cfg = json.load(f)
+        cfg = read_sealed_json(CFG_PATH)
         if not isinstance(cfg, dict):
             cfg = {}
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        cfg = {}
+    except (OSError, ValueError) as e:
+        log(f"读取配置失败，使用默认设置：{e!r}")
         cfg = {}
     had_net_mode = "net_mode" in cfg
     for k, v in DEFAULT_CFG.items():
@@ -198,18 +261,14 @@ def save_cfg(cfg):
     """原子写入，断电/崩溃不损坏配置"""
     try:
         os.makedirs(CFG_DIR, exist_ok=True)
-        tmp = CFG_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, CFG_PATH)
-    except OSError as e:
+        write_sealed_json(CFG_PATH, cfg)
+    except (OSError, TypeError, ValueError) as e:
         log(f"保存配置失败: {e!r}")
 
 
 def load_cache(stocks):
     try:
-        with open(CACHE_PATH, encoding="utf-8") as f:
-            raw = json.load(f)
+        raw = read_sealed_json(CACHE_PATH)
     except (OSError, ValueError):
         return {}
     out = {}
@@ -223,10 +282,7 @@ def load_cache(stocks):
 
 def save_cache(data):
     try:
-        tmp = CACHE_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-        os.replace(tmp, CACHE_PATH)
+        write_sealed_json(CACHE_PATH, data)
     except (OSError, TypeError, ValueError):
         pass
 
@@ -2791,10 +2847,8 @@ class App:
         def chk(b):
             return W.MF_CHECKED if b else 0
 
+        # 顶层：立即刷新 / 常驻面板 / 基础配置 / 高级配置 / 退出
         m = W.CreatePopupMenu()
-        W.AppendMenuW(m, chk(c["panel_pinned"]), 1, "常驻面板")
-        W.AppendMenuW(m, chk(c["panel_topmost"]), 2, "面板总在最前")
-        W.AppendMenuW(m, W.MF_SEPARATOR, 0, None)
 
         dm = W.CreatePopupMenu()
         for i, name in enumerate(DISGUISE_NAMES):
@@ -2808,12 +2862,10 @@ class App:
         W.AppendMenuW(dm, W.MF_GRAYED, 14, f"循环切换伪装\t{dk}")
         W.AppendMenuW(dm, W.MF_SEPARATOR, 0, None)
         W.AppendMenuW(dm, chk(c["hide_tray_in_disguise"]), 15, "伪装时隐藏托盘图标")
-        W.AppendMenuW(m, W.MF_POPUP, dm, "伪装")
 
         im = W.CreatePopupMenu()
         for i, sec in enumerate(INTERVALS):
             W.AppendMenuW(im, W.MFT_RADIOCHECK | chk(c["interval"] == sec), 20 + i, f"{sec} 秒")
-        W.AppendMenuW(m, W.MF_POPUP, im, "刷新间隔")
 
         bm = W.CreatePopupMenu()
         W.AppendMenuW(bm, W.MFT_RADIOCHECK | chk(c["bar_mode"] == "embed"), 30,
@@ -2865,10 +2917,6 @@ class App:
         W.AppendMenuW(rm, W.MF_SEPARATOR, 0, None)
         W.AppendMenuW(rm, chk(c["bar_name"]), 66,
                       "任务栏显示名称" + ("（网速伪装下不显示）" if c["disguise"] == 2 else ""))
-        W.AppendMenuW(m, W.MF_POPUP, rm, "任务栏盯哪只")
-
-        W.AppendMenuW(m, chk(c["updown_color"]), 90, "涨红跌绿着色")
-        W.AppendMenuW(m, W.MF_POPUP, bm, "任务栏显示")
 
         xm = W.CreatePopupMenu()                       # 网络方式：直连 / 加密中转
         rcfg = self._relay
@@ -2888,15 +2936,33 @@ class App:
         W.AppendMenuW(xm, 0 if (rcfg or c["relay_conn"]) else W.MF_GRAYED, 103, "清除连接串")
         label = {"relay": "网络方式：加密中转", "direct": "网络方式：直连"}.get(
             c["net_mode"], "网络方式：未选择（暂不联网）")
-        W.AppendMenuW(m, W.MF_POPUP, xm, label)
 
-        W.AppendMenuW(m, W.MF_SEPARATOR, 0, None)
-        W.AppendMenuW(m, chk(self.autostart_enabled()), 33, "开机自动启动")
+        sm = W.CreatePopupMenu()                       # 基础配置：日常显示相关
+        W.AppendMenuW(sm, W.MF_POPUP, rm, "任务栏盯哪只")
+        W.AppendMenuW(sm, W.MF_POPUP, im, "刷新间隔")
+        W.AppendMenuW(sm, chk(c["updown_color"]), 90, "数值着色")
+        W.AppendMenuW(sm, W.MF_SEPARATOR, 0, None)
+        W.AppendMenuW(sm, chk(c["panel_topmost"]), 2, "面板总在最前")
+        W.AppendMenuW(sm, 0, 35, "面板回到默认位置")
+        W.AppendMenuW(sm, W.MF_SEPARATOR, 0, None)
+        W.AppendMenuW(sm, chk(self.autostart_enabled()), 33, "开机自动启动")
+
+        am = W.CreatePopupMenu()                       # 高级配置：网络、伪装、任务栏方式、维护
+        W.AppendMenuW(am, W.MF_POPUP, xm, label)
+        W.AppendMenuW(am, W.MF_POPUP, dm, "伪装")
+        W.AppendMenuW(am, W.MF_POPUP, bm, "任务栏显示")
+        W.AppendMenuW(am, W.MF_SEPARATOR, 0, None)
+        W.AppendMenuW(am, 0, 36, "打开配置目录")
+        W.AppendMenuW(am, W.MF_SEPARATOR, 0, None)
+        W.AppendMenuW(am, 0, 50, "卸载：清除配置并退出")
+
+        # 顶层只留中性的几项：常用操作在上，设置在中间，退出在最下
         W.AppendMenuW(m, 0, 34, "立即刷新")
-        W.AppendMenuW(m, 0, 35, "面板回到默认位置")
-        W.AppendMenuW(m, 0, 36, "打开配置目录")
+        W.AppendMenuW(m, chk(c["panel_pinned"]), 1, "常驻面板")
         W.AppendMenuW(m, W.MF_SEPARATOR, 0, None)
-        W.AppendMenuW(m, 0, 50, "卸载：清除配置并退出")
+        W.AppendMenuW(m, W.MF_POPUP, sm, "基础配置")
+        W.AppendMenuW(m, W.MF_POPUP, am, "高级配置")
+        W.AppendMenuW(m, W.MF_SEPARATOR, 0, None)
         W.AppendMenuW(m, 0, 51, "退出")
         self.on_command(self.track_menu(m, x, y))
 
@@ -3293,6 +3359,7 @@ def main():
         W.PostMessageW(old, W.WM_ENDSESSION, 1, 0)   # 用 Post：旧进程万一卡住也不会把这里拖住
         time.sleep(1.5)
     migrate_identity()
+    seal_plain_logs()                              # 旧的明文日志改成密文
     sys.excepthook = lambda t, v, tb: log("未捕获异常:\n" + "".join(
         traceback.format_exception(t, v, tb)))
     try:

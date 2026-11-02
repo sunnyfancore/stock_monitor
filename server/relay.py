@@ -311,7 +311,7 @@ def main():
     else:
         url = f"swr://{token}@你的域名/反代路径"
         hint = "反代模式：把“你的域名/反代路径”换成实际值，例如 swr://令牌@example.com/stock-api"
-    log("客户端连接串（盯盘小窗首次运行点「设置加密中转」，或右键菜单「网络方式 → 设置连接串」里粘贴）：")
+    log("客户端连接串（盯盘小窗首次运行点「设置加密中转」，或右键菜单「高级配置 → 网络方式 → 设置连接串」里粘贴）：")
     print(url, flush=True)
     log(hint)
     try:                     # 同时写入 data/url（仅本用户可读），随时 cat data/url 查看
