@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-"""盯盘小窗 2.0 —— 纯 Win32 原生版（无 Qt，仅 Python 标准库 + ctypes）
+"""盯盘小窗 —— Windows 任务栏盯盘小组件（Python 标准库 + ctypes 调用 Win32 API）
 
 组成：
   1. 任务栏条（Bar）
-     - 原生嵌入：作为 Shell_TrayWnd 的子窗口创建，真正长在任务栏里。
-       Win10 会把任务按钮区（MSTaskSwWClass）缩窄让出位置，按钮自动重排、不重叠；
-       Win11 嵌在托盘区左侧。随任务栏自动隐藏、全屏时随任务栏一起让位，不需要置顶。
-     - 兼容模式：透明置顶窗口覆盖（嵌入失败自动回退，也可在菜单手动切换）
-     - 逐像素 Alpha 抗锯齿文字（UpdateLayeredWindow），背景完全透明
-  2. 悬浮面板（Panel）：鼠标停留展开；点击条/钉住按钮 → 常驻；拖动标题栏可放到任意位置（自动记忆）
-  3. 伪装：正常 / 隐私（无名称无红绿）/ 网速监视器；老板键一键隐藏全部
-  4. 托盘、开机自启、单实例、Explorer 重启自愈、睡眠唤醒自动刷新、日志
+     - 嵌入：作为 Shell_TrayWnd 的子窗口创建，与任务栏融为一体。
+       Win10 缩窄任务按钮区（MSTaskSwWClass）让出位置；Win11 显示在托盘区左侧。
+     - 覆盖：透明置顶窗口（嵌入失败时自动使用，也可在菜单切换）
+     - 逐像素 Alpha 抗锯齿文字（UpdateLayeredWindow），背景透明
+  2. 面板（Panel）：鼠标停留展开；单击条 / 图钉 → 常驻；拖动标题栏移动（位置自动记忆）；搜索添加
+  3. 伪装：正常 / 隐私 / 网速伪装；老板键一键隐藏
+  4. 联网：未选择联网方式前不发任何请求；直连腾讯（https）或经自建服务器加密中转
+  5. 托盘、开机自启、单实例、Explorer 重启自愈、睡眠唤醒刷新、日志
 
 配置：%APPDATA%\\StockWatcher\\stocks.json
 """
@@ -82,7 +82,8 @@ DEFAULT_CFG = {
     "aliases": {},                 # 自定义别名 {代码: 别名}，任务栏和面板优先显示
     "updown_color": False,         # 涨红跌绿着色（默认关闭 = 不着色）
     "bar_offset": 0,               # 任务栏条位置微调（物理像素，正数=往托盘方向/右移），拖动条可调
-    "relay_on": False,             # 经自建服务器加密中转（隐藏腾讯域名和查询内容）
+    "net_mode": "",                # 联网方式："" 未选择（不发任何请求）/ "direct" 直连腾讯 / "relay" 加密中转
+    "relay_on": False,             # 与 net_mode == "relay" 同步（内部使用）
     "relay_conn": "",              # 中转连接串（DPAPI 按当前 Windows 用户加密后 base64，明文不落盘）
     "relay_allow_direct": False,   # 中转连不上时是否允许直连腾讯（会暴露域名）
     "last_rotate": 0,              # 上次用过的轮播间隔（菜单“轮播”项恢复用）
@@ -127,6 +128,7 @@ def load_cfg():
             cfg = {}
     except (OSError, ValueError):
         cfg = {}
+    had_net_mode = "net_mode" in cfg
     for k, v in DEFAULT_CFG.items():
         cfg.setdefault(k, v)
     # 校验 / 修正
@@ -144,9 +146,19 @@ def load_cfg():
         cfg["interval"] = min(60, max(1, int(cfg["interval"])))
     except (TypeError, ValueError):
         cfg["interval"] = 3
-    if cfg["disguise"] not in (0, 1, 2):
+    if type(cfg["disguise"]) is not int or cfg["disguise"] not in (0, 1, 2):   # 1.0 这类也不行
         cfg["disguise"] = 0
-    cfg["relay_on"] = bool(cfg["relay_on"])
+    for k in ("boss_key", "disguise_key"):   # 手改配置写错类型时恢复默认，避免菜单打不开
+        if not isinstance(cfg[k], str):
+            cfg[k] = DEFAULT_CFG[k]
+    for k in ("panel_pinned", "panel_topmost", "hide_fullscreen", "hide_tray_in_disguise"):
+        v = cfg[k]
+        cfg[k] = v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes")
+    if not had_net_mode:                     # 没选过联网方式：已配好中转的沿用中转，否则等用户选择
+        cfg["net_mode"] = "relay" if (cfg.get("relay_on") and cfg.get("relay_conn")) else ""
+    if cfg["net_mode"] not in ("", "direct", "relay"):
+        cfg["net_mode"] = ""
+    cfg["relay_on"] = cfg["net_mode"] == "relay"
     cfg["relay_allow_direct"] = bool(cfg["relay_allow_direct"])
     if not isinstance(cfg["relay_conn"], str):
         cfg["relay_conn"] = ""
@@ -439,6 +451,7 @@ class Worker:
         self.lock = threading.Lock()
         self.job = None
         self.result = None
+        self.alive = True            # 置 False 后线程在当前请求结束时退出（看门狗重建时用）
         threading.Thread(target=self._run, daemon=True).start()
 
     def submit(self, gen, codes, route):
@@ -457,6 +470,8 @@ class Worker:
         while True:
             self.ev.wait()
             self.ev.clear()
+            if not self.alive:
+                break
             with self.lock:
                 job, self.job = self.job, None
             if not job:
@@ -476,9 +491,13 @@ class Worker:
                 except Exception as e:
                     res, err = None, e
                 line, relay_err = f.route, f.relay_error
+            if not self.alive:                     # 已被看门狗替换：结果作废，线程退出
+                break
             with self.lock:
                 self.result = (gen, res, err, line, relay_err)
             W.PostMessageW(self.hwnd, WM_APP_QUOTES, 0, 0)
+        if f is not None:
+            f.close()
 
 
 class SearchWorker:
@@ -574,7 +593,7 @@ class Bar:
         self.embedded = False
         if self.app.cfg["bar_mode"] == "embed" and tb and not self.embed_failed:
             hwnd = W.CreateWindowExW(W.WS_EX_LAYERED | W.WS_EX_NOACTIVATE, BAR_CLS,
-                                     "StockWatcherBar", W.WS_CHILD | W.WS_CLIPSIBLINGS,
+                                     "", W.WS_CHILD | W.WS_CLIPSIBLINGS,
                                      0, 0, 1, 1, tb, None, HINST, None)
             if hwnd:
                 self.embedded = True
@@ -583,7 +602,7 @@ class Bar:
                 self.embed_failed = True
         if not hwnd:
             hwnd = W.CreateWindowExW(W.WS_EX_LAYERED | W.WS_EX_TOOLWINDOW | W.WS_EX_TOPMOST
-                                     | W.WS_EX_NOACTIVATE, BAR_CLS, "StockWatcherBar",
+                                     | W.WS_EX_NOACTIVATE, BAR_CLS, "",
                                      W.WS_POPUP, 0, 0, 1, 1, None, None, HINST, None)
         if not hwnd:
             log(f"创建任务栏条失败: {ctypes.get_last_error()}")
@@ -637,7 +656,9 @@ class Bar:
         fg, sub = th.bar_text, th.bar_sub
         q = a.current_quote()
         m = a.cfg["disguise"]
-        label = a.bar_label()            # 轮播 / 显示名称时的短标识；网速伪装下为空
+        label = a.bar_label()            # 开启“显示名称”时的短标识；网速伪装下为空
+        if self.edge in (W.ABE_LEFT, W.ABE_RIGHT):
+            label = ""                   # 竖向任务栏太窄：不显示名称，避免价格被截掉
         name_p = [(label + " ", fg, "bar_name")] if label else []
         if not q:
             l1 = [("--", fg)]
@@ -755,7 +776,7 @@ class Bar:
                     self.drag_offset = y - (bottom - h)
             rect = (x, y, x + w, y + h)
             diag = (tbr, tray, bool(ok), edge)
-            if diag != self._last_diag:                       # 几何变化时记一次诊断日志
+            if self._last_diag is None and not self.dragging:   # 每次启动只记一次贴靠诊断
                 self._last_diag = diag
                 log(f"贴靠诊断：任务栏={tbr} 托盘区TrayNotifyWnd={tray} 有效={bool(ok)} "
                     f"边={edge} Win11={IS_WIN11} 缩放={self.app.scale:.2f} "
@@ -821,7 +842,7 @@ class Bar:
             x, y = mr[0] + new, tbr[1]
         rect = (x, y, x + w, y + h)
         diag = ("win10", rr, mr[0], full, need, off)
-        if diag != self._last_diag:
+        if self._last_diag is None and not self.dragging:     # 每次启动只记一次贴靠诊断
             self._last_diag = diag
             log(f"贴靠诊断(Win10)：ReBar={rr} 任务按钮区={mr} 完整宽={full} 当前宽={cur} "
                 f"条宽={need} 微调={off} → 条={rect}")
@@ -887,6 +908,18 @@ class Bar:
             return
         sdc = W.GetDC(None)
         mem = W.CreateCompatibleDC(sdc)
+        ok = False
+        try:
+            ok = self._paint_into(sdc, mem, wid, hei)
+        finally:                                  # 无论绘制是否异常都释放 GDI 对象，杜绝句柄泄漏
+            W.DeleteDC(mem)
+            W.ReleaseDC(None, sdc)
+        if not ok and self.embedded:
+            log(f"嵌入窗口绘制失败({ctypes.get_last_error()})，回退覆盖模式")
+            self.embed_failed = True
+            self.app.post_rebuild_bar()
+
+    def _paint_into(self, sdc, mem, wid, hei):
         bmi = W.BITMAPINFO()
         bh = bmi.bmiHeader
         bh.biSize = ctypes.sizeof(W.BITMAPINFOHEADER)
@@ -894,9 +927,12 @@ class Bar:
         bh.biPlanes, bh.biBitCount = 1, 32
         bits = ctypes.c_void_p()
         hbmp = W.CreateDIBSection(mem, byref(bmi), W.DIB_RGB_COLORS, byref(bits), None, 0)
-        ok = False
-        if hbmp and bits.value:
-            old = W.SelectObject(mem, hbmp)
+        if not (hbmp and bits.value):
+            if hbmp:
+                W.DeleteObject(hbmp)
+            return False
+        old = W.SelectObject(mem, hbmp)
+        try:
             W.SetBkMode(mem, W.TRANSPARENT)
             n = wid * hei * 4
             # 第 1 遍：全部画白字 → 得到覆盖率（Alpha）
@@ -917,16 +953,11 @@ class Bar:
             out[3::4] = cov[1::4].translate(alpha_table(base))
             ctypes.memmove(bits.value, bytes(out), n)
             blend = W.BLENDFUNCTION(0, 0, 255, W.AC_SRC_ALPHA)
-            ok = W.UpdateLayeredWindow(self.hwnd, sdc, None, byref(W.SIZE(wid, hei)), mem,
-                                       byref(W.POINT(0, 0)), 0, byref(blend), W.ULW_ALPHA)
+            return bool(W.UpdateLayeredWindow(self.hwnd, sdc, None, byref(W.SIZE(wid, hei)), mem,
+                                              byref(W.POINT(0, 0)), 0, byref(blend), W.ULW_ALPHA))
+        finally:
             W.SelectObject(mem, old)
             W.DeleteObject(hbmp)
-        W.DeleteDC(mem)
-        W.ReleaseDC(None, sdc)
-        if not ok and self.embedded:
-            log(f"嵌入窗口绘制失败({ctypes.get_last_error()})，回退覆盖模式")
-            self.embed_failed = True
-            self.app.post_rebuild_bar()
 
     # ---------- 消息 ----------
     def proc(self, hwnd, msg, wp, lp):
@@ -1037,6 +1068,7 @@ class Panel:
         self.searching = False
         self.search_err = False
         self.enter_pending = False   # 结果未到就按了回车：结果一到自动添加第一条
+        self.net_btns = {}           # “选择联网方式”提示里的两个按钮
         self.input_kind = None       # 非 None：输入框正在输入设置（alias / rotate_top / rotate_sec）
         self.input_code = None
         self.input_prompt = None
@@ -1051,7 +1083,7 @@ class Panel:
         self.list_top = self.list_bottom = 0
         self.input_rc = self.add_rc = (0, 0, 0, 0)
         ex = W.WS_EX_TOOLWINDOW | (W.WS_EX_TOPMOST if app.cfg["panel_topmost"] else 0)
-        self.hwnd = W.CreateWindowExW(ex, PANEL_CLS, APP_TITLE, W.WS_POPUP | W.WS_CLIPCHILDREN,
+        self.hwnd = W.CreateWindowExW(ex, PANEL_CLS, "", W.WS_POPUP | W.WS_CLIPCHILDREN,
                                       0, 0, 10, 10, None, None, HINST, None)
         HANDLERS[self.hwnd] = self.proc
         self.edit = W.CreateWindowExW(0, "EDIT", "", W.WS_CHILD | W.WS_VISIBLE | W.WS_TABSTOP
@@ -1086,12 +1118,17 @@ class Panel:
     def update_cue(self):
         if self.input_kind is not None:          # 正在输入别名：别覆盖别名提示
             return
-        self._set_cue("搜索添加监视项" if self.app.cfg["disguise"] == 2
+        m = self.app.cfg["disguise"]
+        self._set_cue("搜索添加监视项" if m == 2 else "输入代码或名称搜索" if m == 1
                       else "搜索：名称 / 拼音 / 代码，如 茅台、zgpa、00700")
 
     def _set_cue(self, cue):
         self._cue = ctypes.create_unicode_buffer(cue)
         W.SendMessageW(self.edit, W.EM_SETCUEBANNER, 1, ctypes.addressof(self._cue))
+
+    def net_prompt(self):
+        """是否显示“选择联网方式”提示（未选择、且不在搜索 / 设置输入中）"""
+        return self.app.net_unset() and not self.query and self.input_kind is None
 
     # ---------- 布局 ----------
     def layout(self):
@@ -1107,6 +1144,12 @@ class Panel:
             list_h = rows * s(P_ROW)
         else:
             list_h = vis * s(P_ROW) if n else s(60)
+        self.net_btns = {}
+        if self.net_prompt():                     # 首次使用：先选联网方式（选之前不发任何请求）
+            list_h = max(list_h, s(124))
+            by, bh, bw = self.list_top + s(2) + s(72), s(34), (w - s(12) * 2 - s(10)) // 2
+            self.net_btns = {"relay": (s(12), by, s(12) + bw, by + bh),
+                             "direct": (w - s(12) - bw, by, w - s(12), by + bh)}
         self.list_bottom = self.list_top + s(2) + list_h + s(4)
         bt = self.list_bottom + s(10)
         bb = bt + s(34)
@@ -1191,7 +1234,8 @@ class Panel:
         self._show_at(*self.anchor_pos())
         W.SetTimer(self.hwnd, T_COLLAPSE, 120, None)
 
-    def show_pinned(self):
+    def show_pinned(self, persist=True):
+        """persist=False：只临时常驻显示（如首次运行的“选择联网方式”），不改用户的常驻设置"""
         if self.app.suppressed():
             self.mode = "pinned"
             return
@@ -1207,7 +1251,7 @@ class Panel:
         else:
             x, y = self.anchor_pos()
         self._show_at(x, y)
-        if not self.app.cfg["panel_pinned"]:
+        if persist and not self.app.cfg["panel_pinned"]:
             self.app.cfg["panel_pinned"] = True
             save_cfg(self.app.cfg)
         W.InvalidateRect(self.hwnd, None, False)
@@ -1249,7 +1293,7 @@ class Panel:
                 W.KillTimer(self.hwnd, T_COLLAPSE)
         elif self.mode == "pinned" and not self.visible():
             self.mode = None
-            self.show_pinned()
+            self.show_pinned(persist=self.app.cfg["panel_pinned"])   # 恢复显示，不改常驻设置
 
     def ensure_top(self):
         if self.mode == "pinned" and self.app.cfg["panel_topmost"] and self.visible():
@@ -1282,6 +1326,12 @@ class Panel:
     # ---------- 交互 ----------
     def hit(self, x, y):
         s = self.app.s
+        if self.net_prompt():
+            for name, (l, t, r, b) in self.net_btns.items():
+                if l <= x < r and t <= y < b:
+                    return ("net", name)
+            if self.list_top <= y < self.list_bottom:   # 提示区其余部分：不能点到下面隐藏的自选行
+                return None
         if y < self.list_top:
             for name, (l, t, r, b) in self.btns.items():
                 if l <= x < r and t <= y < b:
@@ -1330,6 +1380,8 @@ class Panel:
 
     def begin_input(self, kind, code=None):
         a, c = self.app, self.app.cfg
+        if a.suppressed():                       # 老板键 / 全屏隐藏中：面板显示不出来，不进入输入
+            return
         self.end_input(False)
         self._clear_input()                    # 先退出搜索模式
         if kind == "alias":
@@ -1338,7 +1390,7 @@ class Panel:
             prompt = f"给「{nm}」起别名：回车保存，留空清除，Esc 取消"
         elif kind == "rotate_top":
             cur = str(c["rotate_top"]) if c["rotate_top"] else ""
-            prompt = f"轮播前几只（1~{max(1, len(c['stocks']))}，0=全部）：回车保存"
+            prompt = "轮播前几只（0 = 全部）：回车保存"
         elif kind == "relay":
             cur = ""                           # 连接串含令牌：不回显旧值
             prompt = "粘贴连接串 swr://令牌@域名/路径，回车保存"
@@ -1356,7 +1408,7 @@ class Panel:
         W.SetForegroundWindow(self.hwnd)       # 面板在前台时不会被自动收起
         W.SetFocus(self.edit)
         W.SendMessageW(self.edit, W.EM_SETSEL, 0, -1)
-        W.InvalidateRect(self.hwnd, None, False)
+        self.layout()                          # 隐藏“选择联网方式”提示等，重新排版
 
     def _parse_input(self, text):
         """校验输入；返回 (ok, 值)"""
@@ -1383,6 +1435,9 @@ class Panel:
             if not ok:                          # 输入不合法：保持输入状态并闪红
                 self._flash_error()
                 return False
+            if kind == "relay" and not self.app.set_relay_conn(val):
+                self._flash_error()             # 保存失败：保留已粘贴的内容，不用重新粘贴
+                return False
         self.input_kind = self.input_code = self.input_prompt = None
         self.update_cue()
         W.SetWindowTextW(self.edit, "")
@@ -1394,14 +1449,13 @@ class Panel:
                 if code in a.cfg["stocks"]:
                     a.set_alias(code, val)
             elif kind == "relay":
-                if not a.set_relay_conn(val):
-                    self._flash_error()
+                pass                            # 已在上面保存
             elif kind == "rotate_top":
                 a.set_rotate_top(val)
             else:
                 a.cfg["last_rotate"] = val
                 a.set_rotate(val)
-        W.InvalidateRect(self.hwnd, None, False)
+        self.layout()                          # 取消 / 保存后恢复正常排版（含“选择联网方式”提示）
         return True
 
     def end_alias(self, save):
@@ -1556,6 +1610,8 @@ class Panel:
                 a.set_bar_stock(code)
         elif h[0] == "res":
             self.pick(h[1])
+        elif h[0] == "net":
+            a.set_net_mode(h[1])
         elif h[0] == "add":
             self.submit()
         elif h[0] == "input":
@@ -1633,12 +1689,35 @@ class Panel:
         finally:
             W.EndPaint(hwnd, byref(ps))
 
+    def _paint_net_prompt(self, dc, w, y0):
+        th, s, F = self.app.theme, self.app.s, self.app.fonts
+        flags = W.DT_CENTER | W.DT_VCENTER | W.DT_SINGLELINE
+        draw_text(dc, "请选择联网方式", (s(12), y0 + s(8), w - s(12), y0 + s(36)),
+                  F["title"], th.text, flags)
+        draw_text(dc, "选择之前不会发出任何网络请求", (s(12), y0 + s(36), w - s(12), y0 + s(60)),
+                  F["small"], th.sub, flags)
+        for name, label, primary in (("relay", "设置加密中转", True), ("direct", "直连腾讯", False)):
+            if name not in self.net_btns:        # 布局尚未更新（下一次 layout 会补上）
+                continue
+            l, t, r, b = self.net_btns[name]
+            hot = self.hot == ("net", name)
+            if primary:
+                col = mix(th.accent, (255, 255, 255), 0.12) if hot else th.accent
+                fill_round(dc, l, t, r, b, col, s(8))
+                draw_text(dc, label, (l, t, r, b), F["btn"], (255, 255, 255), flags)
+            else:
+                fill_round(dc, l, t, r, b, th.input_bd, s(8))
+                fill_round(dc, l + 1, t + 1, r - 1, b - 1, th.hover if hot else th.bg, s(7))
+                draw_text(dc, label, (l, t, r, b), F["btn"], th.text, flags)
+
     def _paint_results(self, dc, w, y0):
         a, th, s, F = self.app, self.app.theme, self.app.s, self.app.fonts
         bottom = self.list_bottom - s(4)
         flags_c = W.DT_CENTER | W.DT_VCENTER | W.DT_SINGLELINE | W.DT_END_ELLIPSIS
         if not self.results:
-            if self.searching or self.results_for != self.query:
+            if a.net_unset():
+                tip = "还没选择联网方式：清空输入框后选择"
+            elif self.searching or self.results_for != self.query:
                 tip = "搜索中…"
             elif self.search_err:
                 tip = "搜索服务连接失败，可直接输入代码回车添加"
@@ -1657,9 +1736,11 @@ class Panel:
             exists = r["code"] in a.cfg["stocks"]
             mid = (top + bot) // 2
             tag_w = s(64)
-            draw_text(dc, r["name"], (name_l, top, right - tag_w, mid + s(2)), F["name"], th.text,
+            disguised = a.cfg["disguise"] != 0     # 伪装模式：搜索结果只显示代码，不显示名称和市场
+            draw_text(dc, pretty_code(r["code"]) if disguised else r["name"],
+                      (name_l, top, right - tag_w, mid + s(2)), F["name"], th.text,
                       W.DT_LEFT | W.DT_SINGLELINE | W.DT_END_ELLIPSIS | W.DT_BOTTOM)
-            draw_text(dc, f"{pretty_code(r['code'])} · {r['label']}",
+            draw_text(dc, "" if disguised else f"{pretty_code(r['code'])} · {r['label']}",
                       (name_l, mid + s(2), right - tag_w, bot), F["code"], th.sub,
                       W.DT_LEFT | W.DT_SINGLELINE | W.DT_TOP | W.DT_END_ELLIPSIS)
             if exists:
@@ -1711,8 +1792,12 @@ class Panel:
         if self.query:
             self._paint_results(dc, w, y0)
             stocks = []                        # 搜索模式：不画自选列表
+        elif self.net_prompt():
+            self._paint_net_prompt(dc, w, y0)
+            stocks = []                        # 先选联网方式
         elif not stocks:
-            draw_text(dc, "暂无自选，在下方输入名称或代码搜索添加",
+            draw_text(dc, ("暂无自选，在下方输入名称或代码搜索添加", "暂无数据，在下方搜索添加",
+                           "暂无监视项")[m],
                       (0, y0, w, self.list_bottom - s(4)),
                       F["small"], th.sub, W.DT_CENTER | W.DT_VCENTER | W.DT_SINGLELINE)
         vis = min(len(stocks), P_MAXR)
@@ -1821,10 +1906,14 @@ class Panel:
         if msg == W.WM_MOUSEACTIVATE:
             x, y = self._client_pt()
             l, t, r, b = self.input_rc
-            return W.MA_ACTIVATE if (l <= x < r and t <= y < b) else W.MA_NOACTIVATE
+            if l <= x < r and t <= y < b:
+                return W.MA_ACTIVATE
+            if self.hit(x, y) == ("net", "relay"):     # 接下来要输入连接串：需要激活面板
+                return W.MA_ACTIVATE
+            return W.MA_NOACTIVATE
         if msg == W.WM_SETCURSOR:
             if wp == hwnd and W.loword(lp) == W.HTCLIENT and self.hot and \
-                    self.hot[0] in ("btn", "row", "res", "add"):
+                    self.hot[0] in ("btn", "row", "res", "add", "net"):
                 W.SetCursor(W.LoadCursorW(None, W.IDC_HAND))
                 return 1
             return None
@@ -1938,7 +2027,7 @@ class App:
         register_class(HOST_CLS)
         register_class(BAR_CLS, W.CS_DBLCLKS)
         register_class(PANEL_CLS, W.CS_DROPSHADOW)
-        self.host = W.CreateWindowExW(0, HOST_CLS, APP_TITLE, W.WS_POPUP, 0, 0, 0, 0,
+        self.host = W.CreateWindowExW(0, HOST_CLS, "", W.WS_POPUP, 0, 0, 0, 0,   # 不设标题
                                       None, None, HINST, None)
         HANDLERS[self.host] = self.host_proc
         self.msg_taskbar_created = W.RegisterWindowMessageW("TaskbarCreated")
@@ -1969,14 +2058,14 @@ class App:
         self.worker = Worker(self.host)
         self.search_worker = SearchWorker(self.host)
         W.SetTimer(self.host, T_DOCK, 1500, None)
-        if self.cfg["panel_pinned"]:
-            self.panel.show_pinned()
+        if self.cfg["panel_pinned"] or self.net_unset():   # 未选联网方式：弹出面板让用户先选
+            self.panel.show_pinned(persist=self.cfg["panel_pinned"])
         pool = self.rot_pool()
         if self.cfg["pinned"] in pool:
             self.rot_i = pool.index(self.cfg["pinned"])
         self.request_refresh()
         self.restart_rotate()
-        log(f"程序启动 v2（Windows build {WIN_BUILD}，缩放 {self.scale:.2f}）")
+        log(f"程序启动（Windows build {WIN_BUILD}，缩放 {self.scale:.2f}）")
 
     # ---------- 度量 / 字体 ----------
     def s(self, v):
@@ -2092,10 +2181,12 @@ class App:
             log("DPAPI 加密失败，连接串未保存")
             return False
         self.cfg["relay_conn"] = base64.b64encode(enc).decode("ascii")
+        self.cfg["net_mode"] = "relay"
         self.cfg["relay_on"] = True
         self._relay = cfg
         self.relay_issue = None
         save_cfg(self.cfg)
+        self.panel.layout()                       # 关掉“选择联网方式”提示
         log(f"已设置加密中转：{cfg['host']}:{cfg['port']}")
         self.request_refresh(force=True)
         return True
@@ -2108,10 +2199,28 @@ class App:
         save_cfg(self.cfg)
         self.request_refresh(force=True)
 
+    def net_unset(self):
+        return self.cfg["net_mode"] == ""
+
+    def set_net_mode(self, mode):
+        """切换联网方式：direct 直连 / relay 加密中转（没有连接串时先弹出输入）"""
+        if mode == "relay" and not self._relay:
+            self.panel.begin_input("relay")       # 保存连接串时会自动切到 relay
+            return
+        self.cfg["net_mode"] = mode
+        self.cfg["relay_on"] = mode == "relay"
+        self.relay_issue = None
+        save_cfg(self.cfg)
+        log("联网方式：" + ("加密中转" if mode == "relay" else "直连腾讯"))
+        self.panel.layout()
+        self.request_refresh(force=True)
+
     def net_route(self):
         """(中转配置, 允许直连, 禁止联网)"""
         c = self.cfg
-        if not c["relay_on"]:
+        if c["net_mode"] == "":                   # 还没选联网方式：一个请求都不发
+            return (None, False, True)
+        if c["net_mode"] == "direct":
             return (None, True, False)
         if not self._relay:
             return (None, c["relay_allow_direct"], not c["relay_allow_direct"])
@@ -2120,6 +2229,9 @@ class App:
     def _note_route(self, line, err, relay_err):
         """记录线路与中转问题；问题变化时写一次日志"""
         self.net_line = line or ""
+        if self.net_unset():                     # 未选联网方式：本来就不联网，不算中转问题
+            self.relay_issue = None
+            return
         e = relay_err or (err if self.cfg["relay_on"] else None)
         if isinstance(e, PinError):
             issue = "pin"
@@ -2141,6 +2253,8 @@ class App:
 
     def route_tag(self):
         """状态栏里的线路说明；中转出问题时给出明确原因"""
+        if self.net_unset():
+            return "未选择联网方式，暂不联网"
         if not self.cfg["relay_on"]:
             return ""
         if not self._relay:                       # 开了中转却没有可用连接串（未设置 / 换机无法解密）
@@ -2178,7 +2292,7 @@ class App:
         return self.data.get(code) if code else None
 
     def bar_label(self):
-        """任务栏上的短标识（轮播时必显示，固定模式可选）"""
+        """任务栏上的短标识（由“任务栏显示名称”开关决定，固定 / 轮播都适用）"""
         m = self.cfg["disguise"]
         if m == 2 or not self.cfg["bar_name"]:     # 是否显示名称完全由设置项决定
             return ""
@@ -2208,6 +2322,8 @@ class App:
             return                                   # 鼠标停在条上时暂停轮播
         if self.rot_override:                        # 临时显示结束，回到轮播序列
             self.rot_override = None
+            if len(pool) <= 1:                       # 只剩一只可轮：不必再定时
+                W.KillTimer(self.host, T_ROTATE)
         elif len(pool) > 1:
             self.rot_i = (self.rot_i + 1) % len(pool)
         else:
@@ -2225,27 +2341,30 @@ class App:
         self._changed()
 
     def set_rotate_top(self, n):
+        cur = self.bar_code()
         self.cfg["rotate_top"] = n
         self.rot_override = None
-        self.rot_i = 0
-        self._changed()
-        self.restart_rotate()
+        self._follow_rotation(cur)                   # 尽量停在当前这只，不跳回第一只
+        self._changed()                              # 内含 restart_rotate()
 
     def status_text(self):
         tag = self.route_tag()
-        if self.relay_issue in ("pin", "auth", "blocked") and self.net_line != "direct":
-            return tag                                   # 中转出问题且没直连：直接说明原因
+        if self.net_unset() or (self.relay_issue in ("pin", "auth", "blocked")
+                                and self.net_line != "direct"):
+            return tag                                   # 未联网 / 中转出问题且没直连：直接说明原因
         base = self._status_base()
         return f"{base} · {tag}" if tag else base
 
     def _status_base(self):
         if self.fail >= 3:
             return "连接中断 · 重试中"
+        if self.cfg["disguise"] == 2:              # 网速伪装：不出现任何行情字眼
+            if not self.last_ok:
+                return "连接中…"
+            return "实时 · " + datetime.datetime.fromtimestamp(self.last_ok).strftime("%H:%M:%S")
         if not self.last_ok:
-            return "上次收盘数据 · 连接中…" if self.data else "加载中…"
+            return "上次数据 · 连接中…" if self.data else "加载中…"
         t = datetime.datetime.fromtimestamp(self.last_ok).strftime("%H:%M:%S")
-        if self.cfg["disguise"] == 2:
-            return f"实时 · {t}"
         if self.any_market_open():
             lag = time.time() - self.last_ok
             if lag > max(30, 5 * self.cfg["interval"]):   # 开盘中长时间没拿到新数据
@@ -2412,6 +2531,9 @@ class App:
 
     # ---------- 搜索 ----------
     def search(self, keyword):
+        if self.net_unset():                     # 未选联网方式：不搜索（面板会提示先选择）
+            self.panel.on_results(keyword, [], None)
+            return
         self.search_seq += 1
         self.search_worker.submit(self.search_seq, keyword, self.net_route())
 
@@ -2430,6 +2552,8 @@ class App:
 
     def set_disguise(self, m):
         self.cfg["disguise"] = m
+        if m and self.panel.query:               # 切到伪装：清掉屏幕上的搜索结果（含真实名称）
+            self.panel._clear_input()
         self.panel.update_cue()
         self._changed()
         self.sync_tray()
@@ -2453,6 +2577,11 @@ class App:
         self.boss = not self.boss
         log("老板键：" + ("隐藏" if self.boss else "恢复"))
         if self.boss:
+            if self.menu_open:                    # 正开着的右键菜单也要立刻关掉
+                W.SendMessageW(self.host, W.WM_CANCELMODE, 0, 0)
+            if self.panel.query:                  # 清掉搜索结果，恢复时不再显示
+                self.panel._clear_input()
+            self.panel.end_input(False)
             if self.panel.mode == "hover":
                 self.panel.hide()
             self.tray_del()
@@ -2464,6 +2593,11 @@ class App:
     # ---------- 行情 ----------
     def request_refresh(self, force=False):
         W.KillTimer(self.host, T_REFRESH)
+        if self.net_unset():                     # 未选联网方式：不发请求，也不算失败
+            self.fetching = False
+            self.bar.update()
+            self.schedule()
+            return
         if self.fetching and not force:
             return
         codes = list(self.cfg["stocks"])
@@ -2528,7 +2662,7 @@ class App:
 
     def need_fetch(self):
         """此刻是否值得联网：开盘中 / 基金净值时段 / 还没拿到过数据 / 上次失败"""
-        if self.locked or self.boss:             # 锁屏 / 老板键隐藏中：看不到，就不请求
+        if self.locked or self.boss or self.net_unset():   # 锁屏 / 老板键 / 未选联网方式：不请求
             return False
         return (self.any_market_open() or self.fund_window()
                 or not self.last_ok or self.fail > 0)
@@ -2544,7 +2678,7 @@ class App:
 
     def schedule(self):
         now = datetime.datetime.now()
-        if self.locked or self.boss:
+        if self.locked or self.boss or self.net_unset():
             iv = 60                                   # 暂停中：只做本地检查，恢复时会立即刷新
         elif self.any_market_open():
             iv = min(10, 2 + self.fail) if self.fail else self.cfg["interval"]
@@ -2573,7 +2707,8 @@ class App:
             tip = APP_TITLE
             if q:
                 arrow = "↑" if q["pct"] > 0 else ("↓" if q["pct"] < 0 else "")
-                tip = f"{q['name']}  {q['price_s']}  {arrow}{abs(q['pct']):.2f}%"
+                name = self.cfg["aliases"].get(self.bar_code()) or q["name"]   # 与任务栏、面板一致
+                tip = f"{name}  {q['price_s']}  {arrow}{abs(q['pct']):.2f}%"
         else:
             tip = ("数据面板", "网络监视器")[m - 1]
         nid.szTip = tip[:127]
@@ -2641,7 +2776,9 @@ class App:
         W.AppendMenuW(dm, W.MF_SEPARATOR, 0, None)
         bk = c["boss_key"] + ("" if self.hotkey_ok.get(HK_BOSS) else "（未生效）")
         dk = c["disguise_key"] + ("" if self.hotkey_ok.get(HK_DISGUISE) else "（未生效）")
-        W.AppendMenuW(dm, 0, 13, f"老板键：立即隐藏全部\t{bk}")
+        # 热键没注册成功时禁用：否则隐藏后只能靠再次运行程序恢复
+        W.AppendMenuW(dm, 0 if self.hotkey_ok.get(HK_BOSS) else W.MF_GRAYED, 13,
+                      f"老板键：立即隐藏全部\t{bk}")
         W.AppendMenuW(dm, W.MF_GRAYED, 14, f"循环切换伪装\t{dk}")
         W.AppendMenuW(dm, W.MF_SEPARATOR, 0, None)
         W.AppendMenuW(dm, chk(c["hide_tray_in_disguise"]), 15, "伪装时隐藏托盘图标")
@@ -2707,18 +2844,25 @@ class App:
         W.AppendMenuW(m, chk(c["updown_color"]), 90, "涨红跌绿着色")
         W.AppendMenuW(m, W.MF_POPUP, bm, "任务栏显示")
 
-        xm = W.CreatePopupMenu()                       # 加密中转（自建服务器）
+        xm = W.CreatePopupMenu()                       # 网络方式：直连 / 加密中转
         rcfg = self._relay
-        W.AppendMenuW(xm, chk(c["relay_on"]) | (0 if (rcfg or c["relay_on"]) else W.MF_GRAYED), 100,
-                      "经自己的服务器中转（隐藏腾讯域名和查询内容）")
-        W.AppendMenuW(xm, 0, 101, f"更换连接串…（当前 {rcfg['host']}:{rcfg['port']}）" if rcfg
-                      else "设置连接串…")
-        W.AppendMenuW(xm, chk(c["relay_allow_direct"]), 102,
-                      "中转连不上时允许直连腾讯（会暴露域名）")
+        W.AppendMenuW(xm, W.MFT_RADIOCHECK | chk(c["net_mode"] == "relay"), 100,
+                      "加密中转（经自己的服务器，隐藏腾讯域名和查询内容）")
+        W.AppendMenuW(xm, W.MFT_RADIOCHECK | chk(c["net_mode"] == "direct"), 104,
+                      "直连腾讯（https）")
         W.AppendMenuW(xm, W.MF_SEPARATOR, 0, None)
+        if c["net_mode"] == "relay":
+            relay_label = f"更换连接串…（当前 {rcfg['host']}）" if rcfg else "设置连接串…"
+        else:
+            relay_label = "设置连接串并切换到加密中转…"
+        W.AppendMenuW(xm, 0, 101, relay_label)
+        W.AppendMenuW(xm, chk(c["relay_allow_direct"])
+                      | (0 if c["net_mode"] == "relay" else W.MF_GRAYED), 102,
+                      "中转连不上时允许直连腾讯（会暴露域名）")
         W.AppendMenuW(xm, 0 if (rcfg or c["relay_conn"]) else W.MF_GRAYED, 103, "清除连接串")
-        W.AppendMenuW(m, W.MF_POPUP, xm,
-                      "加密中转（已开启）" if c["relay_on"] and rcfg else "加密中转")
+        label = {"relay": "网络方式：加密中转", "direct": "网络方式：直连"}.get(
+            c["net_mode"], "网络方式：未选择（暂不联网）")
+        W.AppendMenuW(m, W.MF_POPUP, xm, label)
 
         W.AppendMenuW(m, W.MF_SEPARATOR, 0, None)
         W.AppendMenuW(m, chk(self.autostart_enabled()), 33, "开机自动启动")
@@ -2780,11 +2924,11 @@ class App:
             self.uninstall()
         elif cmd == 51:
             self.quit()
-        elif cmd == 60:
-            self.set_rotate(0)
         elif 7000 <= cmd < 7200:                      # 直接选中某只固定盯
             i = cmd - 7000
             if i < len(c["stocks"]):
+                if c["bar_rotate"]:
+                    c["last_rotate"] = c["bar_rotate"]   # 记住轮播间隔，下次开启沿用
                 c["bar_rotate"] = 0
                 self.rot_override = None
                 self.set_bar_stock(c["stocks"][i])
@@ -2795,11 +2939,9 @@ class App:
             c["last_rotate"] = cmd - 1000
             self.set_rotate(cmd - 1000)
         elif cmd == 100:
-            c["relay_on"] = not c["relay_on"]
-            self.relay_issue = None
-            save_cfg(c)
-            log("加密中转：" + ("开启" if c["relay_on"] else "关闭"))
-            self.request_refresh(force=True)
+            self.set_net_mode("relay")
+        elif cmd == 104:
+            self.set_net_mode("direct")
         elif cmd == 101:
             self.panel.begin_input("relay")
         elif cmd == 102:
@@ -2906,7 +3048,8 @@ class App:
                                "Windows.UI.Core.CoreWindow", "XamlExplorerHostIslandWindow"):
                     r = W.window_rect(fg)
                     mi = W.monitor_info(W.MonitorFromWindow(fg, W.MONITOR_DEFAULTTONEAREST))
-                    if r and mi:
+                    has_caption = (W.GetWindowLongW(fg, W.GWL_STYLE) & 0x00C00000) == 0x00C00000
+                    if r and mi and not has_caption:   # 有标题栏的最大化窗口不算全屏（任务栏自动隐藏时）
                         m = mi.rcMonitor
                         fs = (r[0] <= m.left and r[1] <= m.top and
                               r[2] >= m.right and r[3] >= m.bottom)
@@ -2934,8 +3077,11 @@ class App:
                 time.time() - self.last_ok > max(30, 5 * self.cfg["interval"]):
             W.InvalidateRect(self.panel.hwnd, None, False)   # 让“数据延迟”提示及时出现
         batches = 1 + max(0, len(self.cfg["stocks"]) - 1) // Fetcher.BATCH
-        if self.fetching and time.time() - self.fetch_started > 20 + 10 * (batches - 1):
+        if self.fetching and time.time() - self.fetch_started > 45 + 10 * (batches - 1):
             log("行情线程超时，重建工作线程")
+            old = self.worker
+            old.alive = False                     # 旧线程完成当前请求后自行退出，不累积
+            old.ev.set()
             self.worker = Worker(self.host)
             self.fetching = False
             self.request_refresh()

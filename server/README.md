@@ -55,13 +55,34 @@ location = /stock-api {
 
 ## 客户端
 
-右键任务栏条 → 加密中转 → 设置连接串，粘贴：
+首次运行客户端时点「设置加密中转」（或右键任务栏条 → 网络方式 → 设置连接串），粘贴：
 
 ```
 swr://令牌@你的域名/stock-api
 ```
 
 （令牌即 `data/token` 的内容；端口不是 443 时写成 `swr://令牌@你的域名:端口/stock-api`）
+
+## 不使用反代（可选）
+
+没有网站或域名时，可由服务端自己提供 HTTPS（自签证书，客户端按指纹校验）：
+
+```yaml
+services:
+  relay:
+    image: ghcr.io/sunnyfancore/stock-relay:latest
+    container_name: stock-relay
+    restart: unless-stopped
+    environment:
+      RELAY_TLS: "1"
+    ports:
+      - "8443:8443"               # 左边为对外端口，可自行修改
+    volumes:
+      - ./data:/data
+```
+
+`docker compose up -d` 后 `cat data/url` 得到连接串模板 `swr://令牌@服务器IP:端口/api?pin=指纹`，
+把其中的服务器 IP 和端口改成实际值即可。
 
 ## 说明
 

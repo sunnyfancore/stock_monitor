@@ -303,14 +303,15 @@ def main():
 
     mode = "TLS 直连（自签证书，客户端固定指纹）" if TLS else "明文 HTTP（由 nginx / 1Panel 反代并负责 HTTPS）"
     log(f"加密中转服务已启动，容器内端口 {PORT}，模式：{mode}")
-    log("证书 SHA256 指纹：" + fp)
+    if TLS:
+        log("证书 SHA256 指纹：" + fp)
     if TLS:
         url = f"swr://{token}@{PUBLIC_HOST or '服务器IP'}:{PUBLIC_PORT}/api?pin={fp}"
         hint = "直连模式：把“服务器IP:端口”换成实际值"
     else:
         url = f"swr://{token}@你的域名/反代路径"
         hint = "反代模式：把“你的域名/反代路径”换成实际值，例如 swr://令牌@example.com/stock-api"
-    log("客户端连接串（盯盘小窗右键菜单「加密中转 → 设置连接串」里粘贴）：")
+    log("客户端连接串（盯盘小窗首次运行点「设置加密中转」，或右键菜单「网络方式 → 设置连接串」里粘贴）：")
     print(url, flush=True)
     log(hint)
     try:                     # 同时写入 data/url（仅本用户可读），随时 cat data/url 查看

@@ -1,14 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包配置（纯 Win32 原生版）
+"""PyInstaller 打包配置
 
-程序只用 Python 标准库 + ctypes，不再依赖 Qt / requests。
-这里剔除 tkinter、sqlite 等用不到的模块（保留 ssl 供名称搜索使用），成品预计约 8~12MB。
-打包：python -m PyInstaller --noconfirm --clean StockWatcher.spec
+程序只用 Python 标准库 + ctypes；这里剔除用不到的模块以减小体积，并打包公共根证书清单。
+打包：python -m PyInstaller --noconfirm --clean StockWatcher.spec（需先 pip install pyinstaller certifi）
 """
 
 EXCLUDES = [
     "tkinter", "_tkinter", "unittest", "pydoc", "pydoc_data", "test", "lib2to3",
-    # 注意：不能剔除 ssl —— 名称搜索接口 smartbox.gtimg.cn 只支持 https
+    # 注意：不能剔除 ssl —— 所有请求都是 https
     "sqlite3", "_sqlite3", "xml", "pyexpat", "_decimal", "decimal",
     "multiprocessing", "concurrent", "asyncio", "distutils", "setuptools",
     "pkg_resources", "lzma", "_lzma", "bz2", "_bz2", "curses", "readline",

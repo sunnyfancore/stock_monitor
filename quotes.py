@@ -241,11 +241,11 @@ def _relay_ca_ctx():
     global _RELAY_CTX
     if _RELAY_CTX is None:
         bundle = _ca_bundle()
-        if bundle:
-            _RELAY_CTX = ssl.create_default_context(cafile=bundle)   # 只加载这份清单，不读系统证书库
-        else:
-            _RELAY_CTX = ssl.create_default_context()                # 兜底：系统证书库（防拦截能力较弱）
-        _RELAY_CTX.minimum_version = ssl.TLSVersion.TLSv1_2
+        if not bundle:                      # 不退回系统证书库：那样公司根证书就能解密，宁可不连
+            raise PinError("缺少公共根证书清单 cacert.pem，无法安全校验（pip install certifi 后重新打包）")
+        ctx = ssl.create_default_context(cafile=bundle)   # 只加载这份清单，不读系统证书库
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        _RELAY_CTX = ctx
     return _RELAY_CTX
 
 
@@ -313,7 +313,8 @@ class Relay:
                 return data
             except ssl.SSLCertVerificationError as e:
                 self.close()                      # 证书不被公共 CA 认可：多半是被拦截解密
-                raise PinError(f"服务器证书校验失败：{e.verify_message}") from e
+                hint = "" if self.cfg.get("fp") else "（若服务端为 RELAY_TLS=1 自签证书，连接串需带 ?pin=指纹）"
+                raise PinError(f"服务器证书校验失败：{e.verify_message}{hint}") from e
             except (PinError, RelayAuthError):
                 self.close()
                 raise                              # 这两类错误重试也没用

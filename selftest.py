@@ -146,8 +146,10 @@ def _relay_settings():
         with open(path, encoding="utf-8") as f:
             cfg = json.load(f)
     except (OSError, ValueError):
-        return False, False, None
-    on, allow = bool(cfg.get("relay_on")), bool(cfg.get("relay_allow_direct"))
+        return True, False, None   # 还没运行过程序（未选联网方式）：同样不做直连测试
+    mode = cfg.get("net_mode", "relay" if cfg.get("relay_on") else "")
+    on = mode != "direct"          # 未选择联网方式 / 加密中转：都不做直连测试（除非允许直连）
+    allow = bool(cfg.get("relay_allow_direct")) and mode == "relay"   # 未选择时一律不直连
     relay = None
     if cfg.get("relay_conn") and sys.platform == "win32":
         try:
@@ -187,7 +189,7 @@ def t_live_quotes():
     if OFFLINE:
         return "离线模式，跳过"
     if NO_DIRECT:
-        return "已开启中转且不允许直连：跳过直连测试"
+        return "未选择联网方式或使用加密中转：跳过直连测试"
     from quotes import Fetcher
     codes = ["sh600519", "sz300750", "r_hk00700", "r_hkHSI", "usAAPL", "jj005827", "sh000001"]
     res = Fetcher().fetch(codes)
@@ -201,7 +203,7 @@ def t_live_search():
     if OFFLINE:
         return "离线模式，跳过"
     if NO_DIRECT:
-        return "已开启中转且不允许直连：跳过直连测试"
+        return "未选择联网方式或使用加密中转：跳过直连测试"
     from quotes import Searcher
     r = Searcher().search("茅台")
     if not any(x["code"] == "sh600519" for x in r):
