@@ -1,32 +1,18 @@
-# 模式三：host-nginx —— 服务器上已经在跑 nginx（宿主机安装的），只启动中转服务，
-# 监听 127.0.0.1，由现有 nginx 反代。nginx 配置见 nginx/host-nginx.conf.example
-# 一键部署：bash install.sh host-nginx
+# 由现有 nginx / 1Panel 反代时使用，说明见 server/README.md
 services:
   relay:
-    image: ${RELAY_IMAGE:-stock-relay:local}
-    build: .
+    image: ghcr.io/sunnyfancore/stock-relay:latest
     container_name: stock-relay
     restart: unless-stopped
     environment:
-      RELAY_TLS: "0"
+      RELAY_TLS: "0"                  # TLS 由 nginx 负责
       RELAY_PORT: "8080"
-      RELAY_PUBLIC_HOST: ${RELAY_PUBLIC_HOST:-}
-      RELAY_PUBLIC_PORT: ${RELAY_PORT:-8443}
+      RELAY_PUBLIC_HOST: "1.2.3.4"    # ← 服务器公网 IP
+      RELAY_PUBLIC_PORT: "8443"       # ← nginx 对外端口
     ports:
-      - "127.0.0.1:${RELAY_LOCAL_PORT:-18080}:8080"   # 只绑本机回环，外网访问不到
+      - "127.0.0.1:18080:8080"
     volumes:
-      - ./data:/data                      # 宿主机 nginx 读取 ./data/cert.pem 与 key.pem
+      - ./data:/data
     read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    mem_limit: 128m
-    pids_limit: 256
-    logging:
-      driver: json-file
-      options:
-        max-size: "1m"
-        max-file: "3"
+    tmpfs: [/tmp]
+    cap_drop: [ALL]

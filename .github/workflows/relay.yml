@@ -1,16 +1,11 @@
-# 盯盘小窗 · 加密中转服务：构建 Docker 镜像 → 推送到 GHCR → SSH 部署到服务器
+# 盯盘小窗 · 加密中转服务：构建 Docker 镜像并推送到 GitHub 容器仓库（GHCR）
 #
-# 需要在仓库 Settings → Secrets and variables → Actions 中配置：
-#   Secrets（必填）：SERVER_HOST      服务器公网 IP（建议用 IP，不要用域名）
-#                    SERVER_USER      SSH 用户名（需能执行 docker）
-#                    SERVER_SSH_KEY   SSH 私钥（对应公钥已加入服务器 ~/.ssh/authorized_keys）
-#   Secrets（可选）：SERVER_SSH_PORT  SSH 端口，默认 22
-#                    SERVER_SSH_FINGERPRINT  服务器 SSH 主机密钥指纹（SHA256:…），防止连到冒充的服务器
-#   Variables（可选）：RELAY_MODE     部署模式 standalone / nginx / host-nginx；留空 = 沿用服务器上次的模式（首次 nginx）
-#                      RELAY_PORT     对外端口，默认 nginx 模式 443、其余 8443（记得在安全组放行）
-#                      DEPLOY_DIR     服务器上的部署目录（相对 SSH 用户主目录），默认 stock-relay
-# 未配置 SERVER_HOST 时只构建镜像、不部署。
-name: relay
+# 触发：推送 server/ 下的改动、推送 v* 标签，或在 Actions 页面手动运行
+# 产物：ghcr.io/<仓库所有者>/stock-relay:latest        最新版
+#       ghcr.io/<仓库所有者>/stock-relay:sha-<提交前7位> 每次提交
+#       ghcr.io/<仓库所有者>/stock-relay:1.2.3          推送标签 v1.2.3 时
+# 部署由你在服务器上用 docker compose 完成，见 server/README.md
+name: relay-image
 
 on:
   push:
@@ -18,32 +13,36 @@ on:
     paths:
       - "server/**"
       - ".github/workflows/relay.yml"
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
 
-concurrency:
-  group: relay-deploy
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.meta.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: 镜像名（GHCR 要求全小写）
-        id: meta
-        run: |
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "image=ghcr.io/${owner}/stock-relay" >> "$GITHUB_OUTPUT"
-
       - name: 语法检查
         run: python3 -m py_compile server/relay.py
+
+      - name: 镜像名（GHCR 要求全小写）
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/stock-relay" >> "$GITHUB_OUTPUT"
+
+      - name: 生成标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -60,69 +59,14 @@ jobs:
           context: server
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ steps.meta.outputs.image }}:latest
-            ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read          # 交给服务器拉镜像的临时令牌只读，且仅在本次运行期间有效
-    env:
-      HAS_HOST: ${{ secrets.SERVER_HOST != '' }}
-    steps:
-      - name: 未配置服务器，跳过部署
-        if: env.HAS_HOST != 'true'
-        run: echo "未设置 SERVER_HOST，只构建了镜像。配置 Secrets 后重新运行即可部署。"
-
-      - uses: actions/checkout@v4
-        if: env.HAS_HOST == 'true'
-
-      # 上传 compose 部署文件（不会覆盖服务器上的 data/ 证书令牌和 .env 设置）
-      - name: 上传部署文件
-        if: env.HAS_HOST == 'true'
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_SSH_PORT || 22 }}
-          fingerprint: ${{ secrets.SERVER_SSH_FINGERPRINT }}
-          source: "server/install.sh,server/docker-compose.yml,server/docker-compose.nginx.yml,server/docker-compose.host-nginx.yml,server/nginx/relay.conf,server/nginx/host-nginx.conf.example,server/Dockerfile,server/relay.py,server/.dockerignore"
-          target: ${{ vars.DEPLOY_DIR || 'stock-relay' }}
-          strip_components: 1
-
-      - name: Docker Compose 部署
-        if: env.HAS_HOST == 'true'
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          IMAGE_REF: ${{ needs.build.outputs.image }}:${{ github.sha }}
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DEPLOY_DIR: ${{ vars.DEPLOY_DIR || 'stock-relay' }}
-          DEPLOY_MODE: ${{ vars.RELAY_MODE }}     # 留空 = 沿用服务器上次的模式（首次默认 nginx）
-          DEPLOY_PORT: ${{ vars.RELAY_PORT }}
-          DEPLOY_HOST: ${{ secrets.SERVER_HOST }}
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_SSH_PORT || 22 }}
-          # 可选：服务器 SSH 主机密钥指纹（ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 得到的 SHA256:…），
-          # 配置后可防止部署时连到冒充的服务器
-          fingerprint: ${{ secrets.SERVER_SSH_FINGERPRINT }}
-          envs: IMAGE_REF,GHCR_USER,GHCR_TOKEN,DEPLOY_DIR,DEPLOY_MODE,DEPLOY_PORT,DEPLOY_HOST
-          script: |
-            set -e
-            cd "$DEPLOY_DIR"
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            # 与手动一键部署走同一个脚本；HIDE_URL=1：连接串含令牌，绝不打印到 Actions 日志
-            NONINTERACTIVE=1 HIDE_URL=1 \
-              RELAY_IMAGE="$IMAGE_REF" RELAY_PUBLIC_HOST="$DEPLOY_HOST" RELAY_PORT="$DEPLOY_PORT" \
-              bash install.sh ${DEPLOY_MODE:+"$DEPLOY_MODE"} || { docker logout ghcr.io >/dev/null 2>&1; exit 1; }
-            docker logout ghcr.io >/dev/null 2>&1 || true
-            docker image prune -f >/dev/null 2>&1 || true
+      - name: 输出镜像地址
+        run: |
+          echo "### 镜像已推送" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

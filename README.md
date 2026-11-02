@@ -88,8 +88,8 @@ Win11 新托盘图标默认收在「^」里，可直接拖到任务栏，或在 
 
 - 默认直连腾讯接口，**全部走 https**：抓包只能看到 `gtimg.cn` 域名，看不到查询了什么
 - 若连域名也要隐藏、并防止公司根证书/抓包工具做中间人解密：部署 `server/` 下的中转服务
-  （Docker Compose 一键部署：服务器上 `cd server && sudo bash install.sh`，可选 nginx 反代 / 接入已有 nginx /
-  GitHub Actions 自动部署，见 [server/README.md](server/README.md)），然后
+  （GitHub Actions 自动构建镜像 `ghcr.io/sunnyfancore/stock-relay`，服务器上用 docker compose 部署，
+  可选 nginx 反代，见 [server/README.md](server/README.md)），然后
   右键任务栏条 → **加密中转 → 设置连接串…**，粘贴服务器日志里的 `swr://…`，回车
   - 客户端按 **IP 直连**，不查 DNS、不发 SNI；**只认你服务器证书的指纹**，系统里装了什么根证书都没用；
     指纹不符立即断开（此时令牌还没发出），状态栏提示「中转证书不符，疑似被拦截」
