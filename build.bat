@@ -10,7 +10,7 @@ if errorlevel 1 (
 )
 
 echo [1/3] Installing PyInstaller ...
-python -m pip install -q --upgrade pyinstaller
+python -m pip install -q --upgrade pyinstaller certifi
 if errorlevel 1 (
   echo [ERROR] pip install pyinstaller failed.
   pause

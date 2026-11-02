@@ -1341,7 +1341,7 @@ class Panel:
             prompt = f"轮播前几只（1~{max(1, len(c['stocks']))}，0=全部）：回车保存"
         elif kind == "relay":
             cur = ""                           # 连接串含令牌：不回显旧值
-            prompt = "粘贴服务器日志里的连接串 swr://…，回车保存"
+            prompt = "粘贴连接串 swr://令牌@域名/路径，回车保存"
         else:
             cur = str(c["bar_rotate"] or c.get("last_rotate") or "")
             prompt = "轮播间隔秒数（1~3600）：回车保存并开启轮播"
@@ -2132,7 +2132,7 @@ class App:
         else:
             issue = None
         if issue != self.relay_issue and issue:
-            msg = {"pin": "中转服务器证书指纹不符，疑似被中间人拦截，已拒绝连接",
+            msg = {"pin": f"中转服务器证书校验失败，疑似被中间人拦截，已拒绝连接：{e}",
                    "auth": "中转令牌被拒绝（令牌错误或服务器已更换令牌）",
                    "blocked": "已开启中转但没有可用连接串，暂停请求",
                    "net": f"中转服务器连接失败：{e!r}"}[issue]
@@ -2147,7 +2147,7 @@ class App:
             return "中转未设置连接串" + ("，当前直连" if self.cfg["relay_allow_direct"] else "，已暂停")
         issue = self.relay_issue
         if issue == "pin":
-            return "中转证书不符，疑似被拦截，已拒绝" + ("（当前直连）" if self.net_line == "direct" else "")
+            return "中转证书校验失败，疑似被拦截，已拒绝" + ("（当前直连）" if self.net_line == "direct" else "")
         if issue == "auth":
             return "中转令牌错误" + ("（当前直连）" if self.net_line == "direct" else "")
         if issue == "blocked":
@@ -2710,7 +2710,7 @@ class App:
         xm = W.CreatePopupMenu()                       # 加密中转（自建服务器）
         rcfg = self._relay
         W.AppendMenuW(xm, chk(c["relay_on"]) | (0 if (rcfg or c["relay_on"]) else W.MF_GRAYED), 100,
-                      "经服务器加密中转（隐藏域名和内容）")
+                      "经自己的服务器中转（隐藏腾讯域名和查询内容）")
         W.AppendMenuW(xm, 0, 101, f"更换连接串…（当前 {rcfg['host']}:{rcfg['port']}）" if rcfg
                       else "设置连接串…")
         W.AppendMenuW(xm, chk(c["relay_allow_direct"]), 102,

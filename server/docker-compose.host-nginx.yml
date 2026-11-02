@@ -1,18 +1,1 @@
-# 由现有 nginx / 1Panel 反代时使用，说明见 server/README.md
-services:
-  relay:
-    image: ghcr.io/sunnyfancore/stock-relay:latest
-    container_name: stock-relay
-    restart: unless-stopped
-    environment:
-      RELAY_TLS: "0"                  # TLS 由 nginx 负责
-      RELAY_PORT: "8080"
-      RELAY_PUBLIC_HOST: "1.2.3.4"    # ← 服务器公网 IP
-      RELAY_PUBLIC_PORT: "8443"       # ← nginx 对外端口
-    ports:
-      - "127.0.0.1:18080:8080"
-    volumes:
-      - ./data:/data
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
+# 已废弃：统一使用 server/docker-compose.yml + 现有 nginx / 1Panel 反代。本文件可以直接删除。

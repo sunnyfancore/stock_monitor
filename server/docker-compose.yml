@@ -1,39 +1,9 @@
-# 示例一：standalone —— 中转服务自己做 TLS，直接对外开放端口
-#
-# 部署：
-#   1. 把本文件放到服务器任意目录（如 /opt/stock-relay/docker-compose.yml）
-#   2. 修改下面 RELAY_PUBLIC_HOST 为服务器公网 IP（可选，只影响打印出来的连接串）
-#   3. docker compose up -d
-#   4. docker exec stock-relay cat /data/url      # 取客户端连接串
-#   5. 云服务器安全组放行 TCP 8443
 services:
   relay:
     image: ghcr.io/sunnyfancore/stock-relay:latest
     container_name: stock-relay
     restart: unless-stopped
-    environment:
-      RELAY_TLS: "1"
-      RELAY_PORT: "8443"
-      RELAY_PUBLIC_HOST: "1.2.3.4"        # ← 改成服务器公网 IP（客户端只接受 IP，不要填域名）
-      RELAY_PUBLIC_PORT: "8443"           # ← 与下面 ports 左边的端口保持一致
     ports:
-      - "8443:8443"                       # 宿主机端口:容器端口；换端口只改左边
+      - "127.0.0.1:18080:8080"    # 只给本机 nginx 反代用；左边端口可自行修改
     volumes:
-      - relay-data:/data                  # 证书、令牌：重建/升级容器不变，连接串长期有效
-    read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    mem_limit: 128m
-    pids_limit: 256
-    logging:
-      driver: json-file
-      options:
-        max-size: "1m"
-        max-file: "3"
-
-volumes:
-  relay-data:
+      - ./data:/data              # 令牌保存在同级 data 目录

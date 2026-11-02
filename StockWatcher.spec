@@ -12,14 +12,27 @@ EXCLUDES = [
     "sqlite3", "_sqlite3", "xml", "pyexpat", "_decimal", "decimal",
     "multiprocessing", "concurrent", "asyncio", "distutils", "setuptools",
     "pkg_resources", "lzma", "_lzma", "bz2", "_bz2", "curses", "readline",
-    "PySide6", "PyQt5", "PyQt6", "requests", "urllib3", "numpy",
+    "PySide6", "PyQt5", "PyQt6", "requests", "urllib3", "numpy", "pip", "certifi",
 ]
+
+# 打包公共根证书清单（Mozilla / certifi 的 cacert.pem）：
+# 中转连接只信任这份清单，公司 / 抓包工具装进系统的根证书无效
+DATAS = []
+for _mod in ("certifi", "pip._vendor.certifi"):
+    try:
+        import importlib
+        DATAS.append((importlib.import_module(_mod).where(), "."))
+        break
+    except Exception:
+        pass
+if not DATAS:
+    print("警告：没找到 cacert.pem（pip install certifi），中转将退回系统证书库校验")
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=DATAS,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

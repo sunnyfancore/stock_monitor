@@ -2,23 +2,25 @@
 # -*- coding: utf-8 -*-
 """盯盘小窗 · 加密中转服务（纯 Python 标准库，无第三方依赖）
 
-作用：客户端只连本服务（按 IP 直连 + 证书指纹固定），由本服务去请求腾讯行情/搜索接口。
-网络上只能看到“某台电脑连了某个 IP 的端口，传输内容已加密”，看不到腾讯域名，也看不到查询内容。
+作用：客户端只连你的服务器，由本服务去请求腾讯行情/搜索接口；网络上看不到腾讯域名和查询内容。
 
-首次启动自动在数据目录生成：
-  cert.pem / key.pem   自签证书（EC P-256，10 年）
-  token                访问令牌（随机 256 位）
-并在日志里打印一行连接串  swr://令牌@IP:端口/证书SHA256指纹  —— 粘贴到客户端即可。
+两种用法：
+  反代（默认，推荐）：本服务明文监听 8080，由 nginx / 1Panel 在你现有网站里加一个反代路径，
+                      共用 443 和网站证书；客户端用公共 CA 清单校验证书（不信任系统里后装的根证书）
+  直连（RELAY_TLS=1）：本服务自己做 TLS（自签证书），客户端按指纹固定证书
+
+首次启动在数据目录生成 token（访问令牌），直连模式另生成 cert.pem / key.pem；
+连接串模板打印到日志并写入 data/url。
 
 环境变量：
+  RELAY_TLS          0 = 反代模式（默认）；1 = 直连模式
+  RELAY_PORT         监听端口（默认反代 8080 / 直连 8443）
   RELAY_DATA         数据目录（默认 /data）
-  RELAY_PORT         监听端口（默认 8443）
-  RELAY_PUBLIC_HOST  客户端连接用的服务器 IP（仅用于打印连接串；强烈建议用 IP 而不是域名）
-  RELAY_PUBLIC_PORT  宿主机映射端口（仅用于打印连接串，默认同 RELAY_PORT）
   RELAY_TOKEN        指定令牌（不设则自动生成并保存）
+  RELAY_PUBLIC_HOST / RELAY_PUBLIC_PORT  仅直连模式用于填充连接串模板（可不设）
 
-接口：只有 POST /api，必须带 Authorization: Bearer <令牌>；其余一切请求（含令牌错误）
-都回一个普通的 nginx 404 页面，扫描到这个端口也看不出它是做什么的。
+接口：任意路径的 POST，必须带 Authorization: Bearer <令牌>；其余一切请求（含令牌错误）
+都回一个普通的 nginx 404 页面，看不出它是做什么的。
   {"op": "q", "codes": ["sh600519", ...]}   → 腾讯行情原始返回（GBK 字节）
   {"op": "s", "kw": "茅台"}                  → 腾讯搜索原始返回（UTF-8 字节）
 只转发这两种请求、严格校验参数，不能被当成通用代理使用。
@@ -40,9 +42,9 @@ import urllib.parse
 
 DATA_DIR = os.environ.get("RELAY_DATA", "/data")
 LISTEN = os.environ.get("RELAY_LISTEN", "0.0.0.0")
-# RELAY_TLS=1：自己做 TLS，直接对外（standalone 模式）
-# RELAY_TLS=0：明文 HTTP，只给前面的 nginx 反代用（nginx / host-nginx 模式，nginx 用本服务生成的同一张证书）
-TLS = os.environ.get("RELAY_TLS", "1").strip() != "0"
+# 默认 RELAY_TLS=0：明文 HTTP 监听 8080，给前面的 nginx / 1Panel 反代用（推荐，可与网站共用 443）
+# RELAY_TLS=1：自己做 TLS（自签证书 + 客户端固定指纹），不经反代直接对外时用
+TLS = os.environ.get("RELAY_TLS", "0").strip() == "1"
 PORT = int(os.environ.get("RELAY_PORT", "8443" if TLS else "8080"))
 PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "").strip()
 PUBLIC_PORT = os.environ.get("RELAY_PUBLIC_PORT", "").strip() or str(PORT)
@@ -198,7 +200,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return hmac.compare_digest(auth[7:].strip().encode(), self.server.token.encode())
 
     def do_POST(self):
-        if self.path != "/api" or not self._authed():
+        # 路径不限：反代路径由你在 nginx 里自定（如 /stock-api），靠令牌鉴权
+        if not self._authed():
             return self._not_found()
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -282,9 +285,11 @@ def health():
 
 
 def main():
-    ensure_cert()            # 明文模式也生成：证书给前面的 nginx 用，指纹写进连接串
     token = ensure_token()
-    fp = cert_fingerprint()
+    fp = ""
+    if TLS:                  # 只有自己做 TLS 时才需要自签证书
+        ensure_cert()
+        fp = cert_fingerprint()
 
     httpd = Server((LISTEN, PORT), Handler)
     httpd.token = token
@@ -296,21 +301,24 @@ def main():
         httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True,
                                        do_handshake_on_connect=False)
 
-    host = PUBLIC_HOST or "<服务器IP>"
-    mode = "TLS 直连" if TLS else "明文（由 nginx 反代并负责 TLS，nginx 须使用本服务生成的证书）"
+    mode = "TLS 直连（自签证书，客户端固定指纹）" if TLS else "明文 HTTP（由 nginx / 1Panel 反代并负责 HTTPS）"
     log(f"加密中转服务已启动，容器内端口 {PORT}，模式：{mode}")
     log("证书 SHA256 指纹：" + fp)
-    url = f"swr://{token}@{host}:{PUBLIC_PORT}/{fp}"
-    log("客户端连接串（在盯盘小窗右键菜单「加密中转 → 设置连接串」里粘贴）：")
+    if TLS:
+        url = f"swr://{token}@{PUBLIC_HOST or '服务器IP'}:{PUBLIC_PORT}/api?pin={fp}"
+        hint = "直连模式：把“服务器IP:端口”换成实际值"
+    else:
+        url = f"swr://{token}@你的域名/反代路径"
+        hint = "反代模式：把“你的域名/反代路径”换成实际值，例如 swr://令牌@example.com/stock-api"
+    log("客户端连接串（盯盘小窗右键菜单「加密中转 → 设置连接串」里粘贴）：")
     print(url, flush=True)
-    try:                     # 同时写入 data/url（仅本用户可读）：日志轮转后 install.sh url 仍能取到
+    log(hint)
+    try:                     # 同时写入 data/url（仅本用户可读），随时 cat data/url 查看
         fd = os.open(URL_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(url + "\n")
+            f.write(url + "\n# " + hint + "\n")
     except OSError as e:
         log(f"写入 {URL_FILE} 失败：{e!r}")
-    if not PUBLIC_HOST:
-        log("提示：未设置 RELAY_PUBLIC_HOST，请把连接串里的 <服务器IP> 换成服务器公网 IP")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

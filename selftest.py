@@ -110,15 +110,30 @@ def t_parse_relay():
     from quotes import parse_relay
     fp = "ab" * 32
     tok = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE"
-    r = parse_relay(f"swr://{tok}@1.2.3.4:8443/{fp}")
-    if not r:
-        raise AssertionError("合法连接串解析失败")
-    eq((r["host"], r["port"], r["fp"]), ("1.2.3.4", 8443, fp), "解析结果")
-    for bad in ("", "swr://short@1.2.3.4:8443/" + fp, f"http://x@1.2.3.4:8443/{fp}",
-                f"swr://{tok}@1.2.3.4:8443/abc",
-                f"swr://{tok}@relay.example.com:8443/{fp}"):     # 域名不接受（会暴露）
-        eq(parse_relay(bad), None, f"非法连接串 {bad[:20]}…")
-    return "合法/非法连接串判断正确"
+    good = {
+        f"swr://{tok}@example.com/stock-api": ("example.com", 443, "/stock-api", ""),
+        f"swr://{tok}@example.com:8443/a/b": ("example.com", 8443, "/a/b", ""),
+        f"swr://{tok}@example.com": ("example.com", 443, "/api", ""),
+        f"swr://{tok}@1.2.3.4:8443/api?pin={fp}": ("1.2.3.4", 8443, "/api", fp),
+        f"swr://{tok}@1.2.3.4:8443/{fp}": ("1.2.3.4", 8443, "/api", fp),       # 旧格式
+    }
+    for s, want in good.items():
+        r = parse_relay(s)
+        if not r:
+            raise AssertionError(f"合法连接串解析失败：{s[:40]}…")
+        eq((r["host"], r["port"], r["path"], r["fp"]), want, "解析结果")
+    for bad in ("", "swr://short@example.com/api", f"http://{tok}@example.com/api",
+                f"swr://{tok}@example.com/api?pin=abc", f"swr://{tok}@exa mple.com/api"):
+        eq(parse_relay(bad), None, f"非法连接串 {bad[:24]}…")
+    return f"{len(good)} 个合法 / 5 个非法用例判断正确"
+
+
+def t_ca_bundle():
+    from quotes import _ca_bundle
+    p = _ca_bundle()
+    if not p:
+        raise AssertionError("找不到公共根证书清单 cacert.pem（pip install certifi）")
+    return f"使用 {p}"
 
 
 def _relay_settings():
@@ -162,8 +177,9 @@ def t_relay():
     if not any(res.values()):
         raise AssertionError("经中转没有取到行情")
     s = Searcher(RELAY, allow_direct=False).search("茅台")
-    return (f"{RELAY['host']}:{RELAY['port']} 证书指纹校验通过；行情 {sum(1 for v in res.values() if v)} 条，"
-            f"搜索 {len(s)} 条")
+    how = "证书指纹校验通过" if RELAY.get("fp") else "公共 CA 证书校验通过"
+    return (f"{RELAY['host']}:{RELAY['port']}{RELAY.get('path', '')} {how}；"
+            f"行情 {sum(1 for v in res.values() if v)} 条，搜索 {len(s)} 条")
 
 
 # ---------------------------------------------------------------- 7. 直连实时接口（需要联网）
@@ -203,6 +219,7 @@ def main():
     check("开盘时间判断", t_market_hours)
     check("搜索结果解析", t_parse_hint)
     check("中转连接串解析", t_parse_relay)
+    check("公共根证书清单", t_ca_bundle)
     check("加密中转服务器（联网）", t_relay)
     check("直连行情接口（联网，https）", t_live_quotes)
     check("直连搜索接口（联网，https）", t_live_search)

@@ -8,10 +8,11 @@
 import datetime
 import hashlib
 import http.client
-import ipaddress
 import json
+import os
 import re
 import ssl
+import sys
 import urllib.parse
 
 HOST = "qt.gtimg.cn"
@@ -178,14 +179,18 @@ def _to_fund_quote(key, f):
 
 
 # ================================================================ 加密中转（自建服务器）
-# 连接串：swr://令牌@IP:端口/证书SHA256指纹（64 位十六进制）
-_RELAY_RE = re.compile(r"^swr://([A-Za-z0-9_\-]{16,128})@([^\s/:@]+|\[[0-9A-Fa-f:]+\]):(\d{1,5})"
-                       r"/([0-9A-Fa-f]{64})/?$")
+# 连接串：swr://令牌@主机[:端口][/路径][?pin=证书SHA256指纹]
+#   反代（推荐）：swr://令牌@example.com/stock-api        端口默认 443，证书用公共 CA 清单校验
+#   直连：        swr://令牌@1.2.3.4:8443/api?pin=<64位十六进制>   自签证书，按指纹固定
+#   兼容旧格式：  swr://令牌@1.2.3.4:8443/<64位十六进制>
+_RELAY_RE = re.compile(
+    r"^swr://([A-Za-z0-9_\-]{16,128})@(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.\-]+)(?::(\d{1,5}))?"
+    r"(/[A-Za-z0-9._~\-/]*)?(?:\?pin=([0-9A-Fa-f]{64}))?$")
 _RELAY_CODE_RE = re.compile(r"^[A-Za-z0-9_.]{2,20}$")
 
 
 class PinError(Exception):
-    """服务器证书指纹不符：疑似被中间人拦截，拒绝连接"""
+    """服务器证书校验失败（指纹不符 / 不是公共 CA 签发）：疑似被中间人拦截，拒绝连接"""
 
 
 class RelayAuthError(Exception):
@@ -193,19 +198,55 @@ class RelayAuthError(Exception):
 
 
 def parse_relay(text):
-    """解析连接串，返回 {"token","host","port","fp"}；格式不对返回 None"""
+    """解析连接串，返回 {"token","host","port","path","fp"}（fp 为空 = 公共 CA 校验）；格式不对返回 None"""
     m = _RELAY_RE.match((text or "").strip())
     if not m:
         return None
-    port = int(m.group(3))
+    token, host, port, path, fp = m.groups()
+    host = host.strip("[]")
+    port = int(port) if port else 443
     if not 0 < port < 65536:
         return None
-    host = m.group(2).strip("[]")
-    try:
-        ipaddress.ip_address(host)             # 只接受 IP：用域名会产生 DNS 查询和 SNI，暴露服务器名
-    except ValueError:
-        return None
-    return {"token": m.group(1), "host": host, "port": port, "fp": m.group(4).lower()}
+    path = path or "/api"
+    if not fp and re.fullmatch(r"/[0-9A-Fa-f]{64}/?", path):   # 旧格式：路径位置放的是指纹
+        fp, path = path.strip("/"), "/api"
+    return {"token": token, "host": host, "port": port, "path": path.rstrip("/") or "/",
+            "fp": (fp or "").lower()}
+
+
+def _ca_bundle():
+    """自带的公共根证书清单（Mozilla / certifi）。打包进 exe；源码运行时用已安装的 certifi 或 pip 自带的那份。
+    只信任这份清单，公司 / 抓包工具装进 Windows 系统的根证书一律无效。找不到时返回 None。"""
+    import importlib
+    cands = []
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        cands.append(os.path.join(base, "cacert.pem"))
+    cands.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "cacert.pem"))
+    for mod in ("certifi", "pip._vendor.certifi"):        # 字符串导入：打包时不会把 pip 带进 exe
+        try:
+            cands.append(importlib.import_module(mod).where())
+        except Exception:
+            pass
+    for p in cands:
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+_RELAY_CTX = None
+
+
+def _relay_ca_ctx():
+    global _RELAY_CTX
+    if _RELAY_CTX is None:
+        bundle = _ca_bundle()
+        if bundle:
+            _RELAY_CTX = ssl.create_default_context(cafile=bundle)   # 只加载这份清单，不读系统证书库
+        else:
+            _RELAY_CTX = ssl.create_default_context()                # 兜底：系统证书库（防拦截能力较弱）
+        _RELAY_CTX.minimum_version = ssl.TLSVersion.TLSv1_2
+    return _RELAY_CTX
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -254,16 +295,25 @@ class Relay:
         for attempt in (0, 1):
             try:
                 if self.conn is None:
-                    self.conn = _PinnedHTTPSConnection(self.cfg["host"], self.cfg["port"],
-                                                       self.cfg["fp"], TIMEOUT + 4)
-                self.conn.request("POST", "/api", body=body, headers=headers)
+                    if self.cfg.get("fp"):        # 直连模式：按指纹固定自签证书
+                        self.conn = _PinnedHTTPSConnection(self.cfg["host"], self.cfg["port"],
+                                                           self.cfg["fp"], TIMEOUT + 4)
+                    else:                         # 反代模式：公共 CA 清单 + 域名校验
+                        self.conn = http.client.HTTPSConnection(
+                            self.cfg["host"], self.cfg["port"], timeout=TIMEOUT + 4,
+                            context=_relay_ca_ctx())
+                self.conn.request("POST", self.cfg.get("path") or "/api", body=body,
+                                  headers=headers)
                 resp = self.conn.getresponse()
                 data = resp.read()
                 if resp.status == 404:
-                    raise RelayAuthError("令牌错误或服务器版本不符")
+                    raise RelayAuthError("令牌或反代路径不对")
                 if resp.status != 200:
                     raise OSError(f"中转服务器 HTTP {resp.status}")
                 return data
+            except ssl.SSLCertVerificationError as e:
+                self.close()                      # 证书不被公共 CA 认可：多半是被拦截解密
+                raise PinError(f"服务器证书校验失败：{e.verify_message}") from e
             except (PinError, RelayAuthError):
                 self.close()
                 raise                              # 这两类错误重试也没用
