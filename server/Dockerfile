@@ -21,8 +21,8 @@ ENV RELAY_DATA=/data \
 VOLUME ["/data"]
 EXPOSE 8443
 
-# 健康检查：本机完成一次 TLS 握手即视为正常
-HEALTHCHECK --interval=60s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import socket,ssl;s=socket.create_connection(('127.0.0.1',8443),3);ssl._create_unverified_context().wrap_socket(s).close()" || exit 1
+# 健康检查：按当前模式（TLS / 明文）连一次本机端口
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python /app/relay.py --health || exit 1
 
 ENTRYPOINT ["python", "/app/relay.py"]

@@ -6,7 +6,9 @@
 #                    SERVER_SSH_KEY   SSH 私钥（对应公钥已加入服务器 ~/.ssh/authorized_keys）
 #   Secrets（可选）：SERVER_SSH_PORT  SSH 端口，默认 22
 #                    SERVER_SSH_FINGERPRINT  服务器 SSH 主机密钥指纹（SHA256:…），防止连到冒充的服务器
-#   Variables（可选）：RELAY_PORT     服务器对外端口，默认 8443（记得在云服务器安全组放行）
+#   Variables（可选）：RELAY_MODE     部署模式 standalone / nginx / host-nginx；留空 = 沿用服务器上次的模式（首次 nginx）
+#                      RELAY_PORT     对外端口，默认 nginx 模式 443、其余 8443（记得在安全组放行）
+#                      DEPLOY_DIR     服务器上的部署目录（相对 SSH 用户主目录），默认 stock-relay
 # 未配置 SERVER_HOST 时只构建镜像、不部署。
 name: relay
 
@@ -77,15 +79,34 @@ jobs:
         if: env.HAS_HOST != 'true'
         run: echo "未设置 SERVER_HOST，只构建了镜像。配置 Secrets 后重新运行即可部署。"
 
-      - name: SSH 部署
+      - uses: actions/checkout@v4
+        if: env.HAS_HOST == 'true'
+
+      # 上传 compose 部署文件（不会覆盖服务器上的 data/ 证书令牌和 .env 设置）
+      - name: 上传部署文件
+        if: env.HAS_HOST == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_SSH_PORT || 22 }}
+          fingerprint: ${{ secrets.SERVER_SSH_FINGERPRINT }}
+          source: "server/install.sh,server/docker-compose.yml,server/docker-compose.nginx.yml,server/docker-compose.host-nginx.yml,server/nginx/relay.conf,server/nginx/host-nginx.conf.example,server/Dockerfile,server/relay.py,server/.dockerignore"
+          target: ${{ vars.DEPLOY_DIR || 'stock-relay' }}
+          strip_components: 1
+
+      - name: Docker Compose 部署
         if: env.HAS_HOST == 'true'
         uses: appleboy/ssh-action@v1.2.0
         env:
           IMAGE_REF: ${{ needs.build.outputs.image }}:${{ github.sha }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELAY_PORT: ${{ vars.RELAY_PORT || '8443' }}
-          RELAY_PUBLIC_HOST: ${{ secrets.SERVER_HOST }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR || 'stock-relay' }}
+          DEPLOY_MODE: ${{ vars.RELAY_MODE }}     # 留空 = 沿用服务器上次的模式（首次默认 nginx）
+          DEPLOY_PORT: ${{ vars.RELAY_PORT }}
+          DEPLOY_HOST: ${{ secrets.SERVER_HOST }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
@@ -94,26 +115,14 @@ jobs:
           # 可选：服务器 SSH 主机密钥指纹（ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 得到的 SHA256:…），
           # 配置后可防止部署时连到冒充的服务器
           fingerprint: ${{ secrets.SERVER_SSH_FINGERPRINT }}
-          envs: IMAGE_REF,GHCR_USER,GHCR_TOKEN,RELAY_PORT,RELAY_PUBLIC_HOST
+          envs: IMAGE_REF,GHCR_USER,GHCR_TOKEN,DEPLOY_DIR,DEPLOY_MODE,DEPLOY_PORT,DEPLOY_HOST
           script: |
             set -e
+            cd "$DEPLOY_DIR"
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            docker pull "$IMAGE_REF"
-            docker logout ghcr.io || true
-            docker rm -f stock-relay >/dev/null 2>&1 || true
-            docker run -d --name stock-relay --restart unless-stopped \
-              -p "${RELAY_PORT}:8443" \
-              -v stock-relay-data:/data \
-              -e RELAY_PUBLIC_HOST="$RELAY_PUBLIC_HOST" \
-              -e RELAY_PUBLIC_PORT="$RELAY_PORT" \
-              --read-only --tmpfs /tmp \
-              --cap-drop ALL --security-opt no-new-privileges \
-              --memory 128m --pids-limit 256 \
-              "$IMAGE_REF"
-            sleep 4
-            # 只输出运行状态；连接串含令牌，绝不打印到 Actions 日志
-            docker ps --filter name=stock-relay --format '容器状态：{{.Status}}'
-            docker logs stock-relay 2>&1 | grep -v 'swr://' | tail -n 5 || true
+            # 与手动一键部署走同一个脚本；HIDE_URL=1：连接串含令牌，绝不打印到 Actions 日志
+            NONINTERACTIVE=1 HIDE_URL=1 \
+              RELAY_IMAGE="$IMAGE_REF" RELAY_PUBLIC_HOST="$DEPLOY_HOST" RELAY_PORT="$DEPLOY_PORT" \
+              bash install.sh ${DEPLOY_MODE:+"$DEPLOY_MODE"} || { docker logout ghcr.io >/dev/null 2>&1; exit 1; }
+            docker logout ghcr.io >/dev/null 2>&1 || true
             docker image prune -f >/dev/null 2>&1 || true
-            echo "部署完成。在服务器上执行以下命令获取连接串："
-            echo "  docker logs stock-relay 2>&1 | grep swr://"

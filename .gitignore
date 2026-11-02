@@ -3,6 +3,10 @@ __pycache__/
 build/
 dist/
 *.spec.bak
+# 服务器部署产物：证书、私钥、令牌、环境配置，绝不入库
+server/data/
+server/.env
+server/nginx/host-nginx.conf
 # 本地旧版配置 / 预览图，不需要入库
 stocks.json
 _raw.png

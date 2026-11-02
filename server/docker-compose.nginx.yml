@@ -1,0 +1,61 @@
+# 模式二：nginx —— 一起启动 nginx 容器做 TLS 和反代，中转服务只在内部网络可见
+# 没带令牌的请求全部由真正的 nginx 返回 404，对外就是一个普通 https 站点
+# 一键部署：bash install.sh nginx
+services:
+  relay:
+    image: ${RELAY_IMAGE:-stock-relay:local}
+    build: .
+    container_name: stock-relay
+    restart: unless-stopped
+    environment:
+      RELAY_TLS: "0"                      # 明文，只给 nginx 用；TLS 由 nginx 负责
+      RELAY_PORT: "8080"
+      RELAY_PUBLIC_HOST: ${RELAY_PUBLIC_HOST:-}
+      RELAY_PUBLIC_PORT: ${RELAY_PORT:-443}
+    expose:
+      - "8080"                            # 不映射到宿主机，外部无法直接访问
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 256
+    networks:
+      - relaynet
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: stock-relay-nginx
+    restart: unless-stopped
+    depends_on:
+      relay:
+        condition: service_healthy        # 等中转服务生成好证书再启动 nginx
+    ports:
+      - "${RELAY_PORT:-443}:443"
+    volumes:
+      - ./nginx/relay.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./data:/etc/relay-cert:ro         # 与中转服务共用同一张证书 → 客户端指纹一致
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    networks:
+      - relaynet
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
+networks:
+  relaynet:
+    driver: bridge

@@ -1,0 +1,31 @@
+# 模式一：standalone —— 中转服务自己做 TLS，直接对外开放端口（服务器上没有 nginx 时用）
+# 一键部署：bash install.sh standalone
+services:
+  relay:
+    image: ${RELAY_IMAGE:-stock-relay:local}
+    build: .
+    container_name: stock-relay
+    restart: unless-stopped
+    environment:
+      RELAY_TLS: "1"
+      RELAY_PORT: "8443"
+      RELAY_PUBLIC_HOST: ${RELAY_PUBLIC_HOST:-}
+      RELAY_PUBLIC_PORT: ${RELAY_PORT:-8443}
+    ports:
+      - "${RELAY_PORT:-8443}:8443"
+    volumes:
+      - ./data:/data                      # 证书、令牌：重建容器不变，连接串长期有效
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"

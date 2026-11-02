@@ -40,13 +40,17 @@ import urllib.parse
 
 DATA_DIR = os.environ.get("RELAY_DATA", "/data")
 LISTEN = os.environ.get("RELAY_LISTEN", "0.0.0.0")
-PORT = int(os.environ.get("RELAY_PORT", "8443"))
+# RELAY_TLS=1：自己做 TLS，直接对外（standalone 模式）
+# RELAY_TLS=0：明文 HTTP，只给前面的 nginx 反代用（nginx / host-nginx 模式，nginx 用本服务生成的同一张证书）
+TLS = os.environ.get("RELAY_TLS", "1").strip() != "0"
+PORT = int(os.environ.get("RELAY_PORT", "8443" if TLS else "8080"))
 PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "").strip()
 PUBLIC_PORT = os.environ.get("RELAY_PUBLIC_PORT", "").strip() or str(PORT)
 
 CERT = os.path.join(DATA_DIR, "cert.pem")
 KEY = os.path.join(DATA_DIR, "key.pem")
 TOKEN_FILE = os.path.join(DATA_DIR, "token")
+URL_FILE = os.path.join(DATA_DIR, "url")
 
 QUOTE_HOST = "qt.gtimg.cn"
 SEARCH_HOST = "smartbox.gtimg.cn"
@@ -264,25 +268,47 @@ class Server(http.server.ThreadingHTTPServer):
             log(f"处理请求异常 {client_address[0]}：{err!r}")
 
 
+def health():
+    """容器健康检查：按当前模式连一次本机端口（TLS 模式还要完成握手）"""
+    import socket
+    try:
+        s = socket.create_connection(("127.0.0.1", PORT), 3)
+        if TLS:
+            s = ssl._create_unverified_context().wrap_socket(s)
+        s.close()
+        return 0
+    except OSError:
+        return 1
+
+
 def main():
-    ensure_cert()
+    ensure_cert()            # 明文模式也生成：证书给前面的 nginx 用，指纹写进连接串
     token = ensure_token()
     fp = cert_fingerprint()
 
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.load_cert_chain(CERT, KEY)
-
     httpd = Server((LISTEN, PORT), Handler)
     httpd.token = token
-    # 握手放到各连接自己的线程里做（do_handshake_on_connect=False），慢连接不会卡住 accept
-    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
+    if TLS:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(CERT, KEY)
+        # 握手放到各连接自己的线程里做（do_handshake_on_connect=False），慢连接不会卡住 accept
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True,
+                                       do_handshake_on_connect=False)
 
     host = PUBLIC_HOST or "<服务器IP>"
-    log(f"加密中转服务已启动，容器内端口 {PORT}")
+    mode = "TLS 直连" if TLS else "明文（由 nginx 反代并负责 TLS，nginx 须使用本服务生成的证书）"
+    log(f"加密中转服务已启动，容器内端口 {PORT}，模式：{mode}")
     log("证书 SHA256 指纹：" + fp)
+    url = f"swr://{token}@{host}:{PUBLIC_PORT}/{fp}"
     log("客户端连接串（在盯盘小窗右键菜单「加密中转 → 设置连接串」里粘贴）：")
-    print(f"swr://{token}@{host}:{PUBLIC_PORT}/{fp}", flush=True)
+    print(url, flush=True)
+    try:                     # 同时写入 data/url（仅本用户可读）：日志轮转后 install.sh url 仍能取到
+        fd = os.open(URL_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(url + "\n")
+    except OSError as e:
+        log(f"写入 {URL_FILE} 失败：{e!r}")
     if not PUBLIC_HOST:
         log("提示：未设置 RELAY_PUBLIC_HOST，请把连接串里的 <服务器IP> 换成服务器公网 IP")
     try:
@@ -292,4 +318,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--health" in sys.argv:
+        sys.exit(health())
     main()
