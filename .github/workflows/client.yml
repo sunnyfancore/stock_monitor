@@ -1,7 +1,7 @@
 # 盯盘小窗客户端：在 Windows 上自检 + 打包 StockWatcher.exe
 #
-# 推送客户端代码 → Actions 页面下载 exe（Artifacts）
-# 在仓库网页上发布 Release → 自动打包并把 exe 附到该 Release
+# 推送客户端代码 / 手动运行 → 自动打包并发布新版本到 Releases（v1.0.<构建序号>，标记为 Latest）
+# 在仓库网页上手动发布 Release → 自动打包并把 exe 附到该 Release
 name: client-exe
 
 on:
@@ -62,7 +62,22 @@ jobs:
             dist/StockWatcher.exe.sha256
           retention-days: 30
 
-      - name: 附加到 Release（仅发布 Release 时）
+      # 推送代码 / 手动运行：自动发布一个新版本（版本号按构建次数递增），标记为 Latest
+      - name: 自动发布 Release
+        if: github.event_name != 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: 盯盘小窗 v1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: "true"
+          generate_release_notes: true
+          files: |
+            dist/StockWatcher.exe
+            dist/StockWatcher.exe.sha256
+
+      # 在网页上手动发布的 Release：把 exe 附上去
+      - name: 附加到手动发布的 Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:

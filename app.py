@@ -1007,8 +1007,8 @@ class Bar:
                 self._finish_drag()
             if W.GetCapture() == hwnd:
                 W.ReleaseCapture()
-            if not was_drag:
-                a.panel.toggle_pinned()
+            if not was_drag and a.panel.mode is None:
+                a.panel.show_hover()             # 单击只是弹出面板（移开自动收起）；常驻只用面板图钉
             return 0
         if msg == W.WM_CAPTURECHANGED:
             self.press_pt = None
@@ -1277,7 +1277,8 @@ class Panel:
         self.hot = None
 
     def toggle_pinned(self):
-        if self.mode == "pinned":
+        """菜单「常驻面板」：按是否已常驻（记住的设置）切换"""
+        if self.app.cfg["panel_pinned"]:
             self.app.cfg["panel_pinned"] = False
             save_cfg(self.app.cfg)
             self.hide()
@@ -1595,8 +1596,8 @@ class Panel:
                 l, t, r, b = self.btns["menu"]
                 rc = W.window_rect(self.hwnd)
                 a.show_menu(rc[0] + l, rc[1] + b)
-            elif h[1] == "pin":
-                if self.mode == "pinned":
+            elif h[1] == "pin":                  # 图钉：唯一的常驻开关（会记住）
+                if self.mode == "pinned" and a.cfg["panel_pinned"]:
                     self.unpin()
                 else:
                     self.show_pinned()
@@ -1777,8 +1778,9 @@ class Panel:
             if hot == ("btn", name):
                 fill_round(dc, *rc, th.hover, s(8))
             if name == "pin":
-                key = "pinned" if self.mode == "pinned" else "pin"
-                color = th.accent if self.mode == "pinned" else th.text
+                pinned = self.mode == "pinned" and a.cfg["panel_pinned"]   # 只有真正常驻才亮
+                key = "pinned" if pinned else "pin"
+                color = th.accent if pinned else th.text
             elif name == "mask":
                 key, color = f"mask{m}", (th.accent if m else th.text)
             else:
@@ -2573,6 +2575,17 @@ class App:
     def cycle_disguise(self):
         self.set_disguise((self.cfg["disguise"] + 1) % 3)
 
+    def toggle_panel_from_tray(self):
+        """托盘左键：显示 / 隐藏面板。显示是临时的（不记为常驻）；
+        隐藏时若面板是用图钉常驻的，同时取消常驻"""
+        if self.panel.visible():
+            if self.cfg["panel_pinned"]:
+                self.cfg["panel_pinned"] = False
+                save_cfg(self.cfg)
+            self.panel.hide()
+        else:
+            self.panel.show_pinned(persist=False)
+
     def toggle_boss(self):
         self.boss = not self.boss
         log("老板键：" + ("隐藏" if self.boss else "恢复"))
@@ -2766,7 +2779,7 @@ class App:
             return W.MF_CHECKED if b else 0
 
         m = W.CreatePopupMenu()
-        W.AppendMenuW(m, chk(self.panel.mode == "pinned"), 1, "常驻面板")
+        W.AppendMenuW(m, chk(c["panel_pinned"]), 1, "常驻面板")
         W.AppendMenuW(m, chk(c["panel_topmost"]), 2, "面板总在最前")
         W.AppendMenuW(m, W.MF_SEPARATOR, 0, None)
 
@@ -3108,14 +3121,14 @@ class App:
         if msg == WM_APP_TRAY:
             ev = W.loword(lp)
             if ev == W.WM_LBUTTONUP:
-                self.panel.toggle_pinned()
+                self.toggle_panel_from_tray()
             elif ev == W.WM_RBUTTONUP:
                 self.show_menu()
             return 0
         if msg == WM_APP_SHOW:                      # 再次启动 exe：找回界面
             if self.boss:
                 self.toggle_boss()
-            self.panel.show_pinned()
+            self.panel.show_pinned(persist=False)   # 临时显示，不改常驻设置
             return 0
         if msg == W.WM_HOTKEY:
             if wp == HK_BOSS:
