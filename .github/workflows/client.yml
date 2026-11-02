@@ -1,4 +1,4 @@
-# 盯盘小窗客户端：在 Windows 上自检 + 打包 StockWatcher.exe
+# 盯盘小窗客户端：在 Windows 上自检 + 打包 NetMonitor.exe
 #
 # 推送客户端代码 / 手动运行 → 自动打包并发布新版本到 Releases（v1.0.<构建序号>，标记为 Latest）
 # 在仓库网页上手动发布 Release → 自动打包并把 exe 附到该 Release
@@ -10,14 +10,13 @@ on:
     paths:
       - "*.py"
       - "StockWatcher.spec"
-      - "icon.ico"
       - ".github/workflows/client.yml"
   release:
     types: [published]       # 在网页上发布 Release 时，自动打包并把 exe 挂上去
   workflow_dispatch:
 
 permissions:
-  contents: write          # 创建 Release 需要
+  contents: write          # 发布 Release 需要
 
 jobs:
   build:
@@ -25,6 +24,7 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
+      APP_VERSION: 1.0.${{ github.run_number }}   # 写进 exe 文件属性
     steps:
       - uses: actions/checkout@v4
 
@@ -46,20 +46,20 @@ jobs:
       - name: 大小与校验值
         shell: pwsh
         run: |
-          $f = Get-Item dist/StockWatcher.exe
+          $f = Get-Item dist/NetMonitor.exe
           $hash = (Get-FileHash $f -Algorithm SHA256).Hash
-          "### StockWatcher.exe" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "### NetMonitor.exe" | Out-File -Append $env:GITHUB_STEP_SUMMARY
           ("大小：{0:N1} MB" -f ($f.Length / 1MB)) | Out-File -Append $env:GITHUB_STEP_SUMMARY
           "SHA256：$hash" | Out-File -Append $env:GITHUB_STEP_SUMMARY
-          "$hash  StockWatcher.exe" | Out-File -Encoding ascii dist/StockWatcher.exe.sha256
+          "$hash  NetMonitor.exe" | Out-File -Encoding ascii dist/NetMonitor.exe.sha256
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: StockWatcher-${{ github.ref_name }}-${{ github.sha }}
+          name: NetMonitor-${{ env.APP_VERSION }}
           path: |
-            dist/StockWatcher.exe
-            dist/StockWatcher.exe.sha256
+            dist/NetMonitor.exe
+            dist/NetMonitor.exe.sha256
           retention-days: 30
 
       # 推送代码 / 手动运行：自动发布一个新版本（版本号按构建次数递增），标记为 Latest
@@ -67,14 +67,14 @@ jobs:
         if: github.event_name != 'release'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: 盯盘小窗 v1.0.${{ github.run_number }}
+          tag_name: v${{ env.APP_VERSION }}
+          name: v${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
           make_latest: "true"
           generate_release_notes: true
           files: |
-            dist/StockWatcher.exe
-            dist/StockWatcher.exe.sha256
+            dist/NetMonitor.exe
+            dist/NetMonitor.exe.sha256
 
       # 在网页上手动发布的 Release：把 exe 附上去
       - name: 附加到手动发布的 Release
@@ -82,5 +82,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/StockWatcher.exe
-            dist/StockWatcher.exe.sha256
+            dist/NetMonitor.exe
+            dist/NetMonitor.exe.sha256

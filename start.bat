@@ -6,9 +6,9 @@ if not errorlevel 1 (
   start "" pythonw app.py
   exit /b
 )
-if exist "dist\StockWatcher.exe" (
-  start "" "dist\StockWatcher.exe"
+if exist "dist\NetMonitor.exe" (
+  start "" "dist\NetMonitor.exe"
   exit /b
 )
-echo Python not found and dist\StockWatcher.exe missing. Run build.bat first.
+echo Python not found and dist\NetMonitor.exe missing. Run build.bat first.
 pause

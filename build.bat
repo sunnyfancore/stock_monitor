@@ -1,5 +1,5 @@
 @echo off
-rem Build dist\StockWatcher.exe  (ASCII only, no goto labels: safe for any code page / line ending)
+rem Build dist\NetMonitor.exe  (ASCII only, no goto labels: safe for any code page / line ending)
 cd /d "%~dp0"
 
 where python >nul 2>nul
@@ -17,8 +17,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [2/3] Closing running StockWatcher ...
-taskkill /f /im StockWatcher.exe >nul 2>nul
+echo [2/3] Closing running instance ...
+taskkill /f /im NetMonitor.exe >nul 2>nul
 
 echo [3/3] Building ...
 python -m PyInstaller --noconfirm --clean StockWatcher.spec
@@ -29,7 +29,7 @@ if errorlevel 1 (
 )
 
 echo.
-if exist "dist\StockWatcher.exe" echo [OK] dist\StockWatcher.exe
-if not exist "dist\StockWatcher.exe" echo [ERROR] dist\StockWatcher.exe not found.
+if exist "dist\NetMonitor.exe" echo [OK] dist\NetMonitor.exe
+if not exist "dist\NetMonitor.exe" echo [ERROR] dist\NetMonitor.exe not found.
 echo.
 pause

@@ -402,7 +402,7 @@ def dpapi_encrypt(data):
     src, _k1 = _blob(data)
     ent, _k2 = _blob(_DPAPI_ENTROPY)
     out = DATA_BLOB()
-    if not CryptProtectData(ctypes.byref(src), "StockWatcher", ctypes.byref(ent), None, None,
+    if not CryptProtectData(ctypes.byref(src), None, ctypes.byref(ent), None, None,   # 不写描述
                             CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(out)):
         return None
     try:

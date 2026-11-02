@@ -141,7 +141,9 @@ def _relay_settings():
     import base64
     import json
     from quotes import parse_relay
-    path = os.path.join(os.environ.get("APPDATA", ""), "StockWatcher", "stocks.json")
+    path = os.path.join(os.environ.get("APPDATA", ""), "NetMonitor", "config.json")
+    if not os.path.exists(path):                     # 还没升级过的旧配置位置
+        path = os.path.join(os.environ.get("APPDATA", ""), "StockWatcher", "stocks.json")
     try:
         with open(path, encoding="utf-8") as f:
             cfg = json.load(f)

@@ -12,13 +12,14 @@
   4. 联网：未选择联网方式前不发任何请求；直连腾讯（https）或经自建服务器加密中转
   5. 托盘、开机自启、单实例、Explorer 重启自愈、睡眠唤醒刷新、日志
 
-配置：%APPDATA%\\StockWatcher\\stocks.json
+配置：%APPDATA%\\NetMonitor\\config.json（对外标识均为中性名称 NetMonitor）
 """
 import base64
 import ctypes
 import datetime
 import json
 import os
+import random
 import shutil
 import sys
 import threading
@@ -34,19 +35,24 @@ from quotes import (Fetcher, PinError, RelayAuthError, Searcher, looks_like_code
 class RelayNotConfigured(Exception):
     """开启了中转、又不允许直连，但没有可用的连接串：不发任何请求"""
 
-APP_NAME = "StockWatcher"
-APP_TITLE = "盯盘小窗"
-HOST_CLS = "StockWatcherHost"
-BAR_CLS = "StockWatcherBar"
-PANEL_CLS = "StockWatcherPanel"
+# 对外标识统一用中性名称：配置目录、开机启动项、窗口类名、单实例锁都不出现“股票”字样
+APP_NAME = "NetMonitor"
+APP_TITLE = "盯盘小窗"                 # 只用于正常模式下的托盘提示 / 卸载确认框
+HOST_CLS = "NetMonitorHost"
+BAR_CLS = "NetMonitorBar"
+PANEL_CLS = "NetMonitorPanel"
+MUTEX_NAME = "NetMonitor_SingleInstance"
+OLD_APP_NAME = "StockWatcher"         # 迁移用：旧标识（配置目录 / 启动项）首次启动时自动换成新标识
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CFG_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), APP_NAME)
-CFG_PATH = os.path.join(CFG_DIR, "stocks.json")
+APPDATA_DIR = os.environ.get("APPDATA") or os.path.expanduser("~")
+CFG_DIR = os.path.join(APPDATA_DIR, APP_NAME)
+OLD_CFG_DIR = os.path.join(APPDATA_DIR, OLD_APP_NAME)
+CFG_PATH = os.path.join(CFG_DIR, "config.json")
 CACHE_PATH = os.path.join(CFG_DIR, "cache.json")     # 最后一次行情，启动时先显示
 LEGACY_CFG = os.path.join(BASE_DIR, "stocks.json")
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -2124,13 +2130,15 @@ class App:
                                           0, 0, q, 0, face)
 
     def _load_icon(self):
-        path = sys.executable if getattr(sys, "frozen", False) else \
-            os.path.join(BASE_DIR, "icon.ico")
-        if os.path.exists(path):
+        """托盘图标：exe 自带的中性图标；源码运行时用程序绘制的同款柱状图标"""
+        if getattr(sys, "frozen", False):
             small = W.HANDLE()
-            if W.ExtractIconExW(path, 0, None, byref(small), 1) and small.value:
+            if W.ExtractIconExW(sys.executable, 0, None, byref(small), 1) and small.value:
                 return small.value
-        return W.LoadIconW(None, W.IDI_APPLICATION)
+        try:
+            return make_monitor_icon()
+        except Exception:
+            return W.LoadIconW(None, W.IDI_APPLICATION)
 
     # ---------- 状态 ----------
     def suppressed(self):
@@ -2689,21 +2697,26 @@ class App:
                 return max(1, int((t - now).total_seconds()))
         return 1800
 
+    JITTER = 0.2                        # 联网间隔随机浮动 ±20%：流量不再是固定节拍的“心跳”
+
     def schedule(self):
         now = datetime.datetime.now()
+        jitter = True
         if self.locked or self.boss or self.net_unset():
-            iv = 60                                   # 暂停中：只做本地检查，恢复时会立即刷新
+            iv, jitter = 60, False                    # 暂停中：只做本地检查，恢复时会立即刷新
         elif self.any_market_open():
             iv = min(10, 2 + self.fail) if self.fail else self.cfg["interval"]
         elif (not self.last_ok or self.fail) and self.fail < 10:
             iv = min(30, 2 + self.fail * 2)           # 还没拿到过数据 / 失败：慢慢重试直到成功一次
         elif self.fail >= 10:
-            iv = min(1800, self._seconds_to_next_active(now))   # 休市且一直连不上：别整夜重试
+            iv, jitter = min(1800, self._seconds_to_next_active(now)), False   # 休市且一直连不上
         elif self.fund_window(now):
             iv = self.FUND_EVERY                      # 基金净值时段：30 分钟一次
         else:
-            iv = self._seconds_to_next_active(now)    # 全部休市：不联网，到点再醒
-        W.SetTimer(self.host, T_REFRESH, int(iv * 1000), None)
+            iv, jitter = self._seconds_to_next_active(now), False   # 全部休市：不联网，到点准时醒
+        if jitter:
+            iv *= random.uniform(1 - self.JITTER, 1 + self.JITTER)
+        W.SetTimer(self.host, T_REFRESH, max(800, int(iv * 1000)), None)
 
     # ---------- 托盘 ----------
     def _nid(self):
@@ -2980,12 +2993,7 @@ class App:
 
     # ---------- 自启 / 卸载 ----------
     def _autostart_value(self):
-        if getattr(sys, "frozen", False):
-            return f'"{sys.executable}"'
-        pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-        if not os.path.exists(pyw):
-            pyw = sys.executable
-        return f'"{pyw}" "{os.path.abspath(__file__)}"'
+        return autostart_command()
 
     def autostart_enabled(self):
         try:
@@ -3003,10 +3011,11 @@ class App:
                 if on:
                     winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, self._autostart_value())
                 else:
-                    try:
-                        winreg.DeleteValue(k, APP_NAME)
-                    except FileNotFoundError:
-                        pass
+                    for name in (APP_NAME, OLD_APP_NAME):
+                        try:
+                            winreg.DeleteValue(k, name)
+                        except FileNotFoundError:
+                            pass
             log(f"开机自启 -> {on}")
         except OSError as e:
             log(f"开机自启设置失败: {e!r}")
@@ -3019,6 +3028,7 @@ class App:
         self.set_autostart(False)
         self.quit(save=False)
         shutil.rmtree(CFG_DIR, ignore_errors=True)
+        shutil.rmtree(OLD_CFG_DIR, ignore_errors=True)
 
     def quit(self, save=True):
         if self.quitting:
@@ -3230,14 +3240,59 @@ class App:
             self.quit()
 
 
+def autostart_command():
+    """开机自启注册表里写入的命令（当前 exe，或源码运行时的 pythonw + app.py）"""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if not os.path.exists(pyw):
+        pyw = sys.executable
+    return f'"{pyw}" "{os.path.abspath(__file__)}"'
+
+
+def migrate_identity():
+    """把旧标识（StockWatcher）留下的痕迹换成中性标识：
+    配置目录 %APPDATA%\\StockWatcher → %APPDATA%\\NetMonitor（搬完删除旧目录），开机启动项改名"""
+    try:
+        if os.path.isdir(OLD_CFG_DIR):
+            os.makedirs(CFG_DIR, exist_ok=True)
+            for src, dst in (("stocks.json", "config.json"), ("cache.json", "cache.json"),
+                             ("log.txt", "log.txt")):
+                s, d = os.path.join(OLD_CFG_DIR, src), os.path.join(CFG_DIR, dst)
+                if os.path.exists(s) and not os.path.exists(d):
+                    shutil.copy2(s, d)
+            shutil.rmtree(OLD_CFG_DIR, ignore_errors=True)
+            log("已迁移旧配置目录，旧目录已删除")
+    except OSError as e:
+        log(f"迁移旧配置失败：{e!r}")
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                            winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as k:
+            try:
+                winreg.QueryValueEx(k, OLD_APP_NAME)
+            except FileNotFoundError:
+                return
+            winreg.DeleteValue(k, OLD_APP_NAME)                 # 旧启动项改成新名字
+            winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, autostart_command())
+            log("已更新开机启动项名称")
+    except OSError:
+        pass
+
+
 def main():
     W.set_dpi_awareness()
-    W.CreateMutexW(None, False, "StockWatcher_SingleInstance")
+    W.CreateMutexW(None, False, MUTEX_NAME)
     if ctypes.get_last_error() == 183:              # 已在运行：唤醒已有实例后退出
         h = W.FindWindowW(HOST_CLS, None)
         if h:
             W.PostMessageW(h, WM_APP_SHOW, 0, 0)
         return
+    old = W.FindWindowW("StockWatcherHost", None)  # 旧标识的实例还在运行：让它正常退出（会还原任务栏）
+    if old:
+        W.PostMessageW(old, W.WM_ENDSESSION, 1, 0)   # 用 Post：旧进程万一卡住也不会把这里拖住
+        time.sleep(1.5)
+    migrate_identity()
     sys.excepthook = lambda t, v, tb: log("未捕获异常:\n" + "".join(
         traceback.format_exception(t, v, tb)))
     try:
