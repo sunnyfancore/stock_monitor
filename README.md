@@ -102,7 +102,9 @@ Win11 新托盘图标默认收在「^」里，可直接拖到任务栏，或在 
 - **源码运行**：双击 `start.bat`，或运行 `pythonw app.py`（需 Python 3.8+，无需 pip 安装任何包）
 - **自检**：双击 `selftest.bat`——检查源码语法、模块导入、代码解析、开盘时间判断，并实测行情/搜索接口，
   逐项显示通过/失败（不启动界面、不改配置）。改完代码或打包前先跑一次
-- **打包 exe**：双击 `build.bat`，生成 `dist\StockWatcher.exe`
+- **GitHub Actions 自动打包**：推送客户端代码后，在仓库 Actions → client-exe → 对应运行的 Artifacts 下载 exe；
+  推送标签（如 `git tag v2.0.0 && git push origin v2.0.0`）会自动创建 Release 并附上 exe 和 SHA256 校验值
+- **本地打包 exe**：双击 `build.bat`，生成 `dist\StockWatcher.exe`
   > 注意：`dist` 里现有的 exe 是旧版（Qt），需要重新打包才会更新为 2.0
 - **开机自启 / 卸载**：托盘或任务栏条右键菜单
 
@@ -141,7 +143,8 @@ Win11 新托盘图标默认收在「^」里，可直接拖到任务栏，或在 
 | start.bat | 一键启动 |
 | selftest.py / selftest.bat | 自检（语法、解析、开盘时间、中转、接口实测） |
 | server/ | 加密中转服务（relay.py + Dockerfile + 部署说明） |
-| .github/workflows/relay.yml | 自动构建镜像并部署到服务器 |
+| .github/workflows/relay.yml | 自动构建中转服务 Docker 镜像（GHCR） |
+| .github/workflows/client.yml | 自动自检并打包客户端 exe（推送标签时发布 Release） |
 | git_push.bat | 关联 GitHub 仓库并推送 |
 
 行情接口 `qt.gtimg.cn`（http），搜索接口 `smartbox.gtimg.cn`（仅 https，所以打包时保留了 ssl 模块）。

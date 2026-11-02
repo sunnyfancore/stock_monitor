@@ -149,10 +149,13 @@ try:
 except Exception:                                    # 读配置都失败：保守处理，不做直连测试
     RELAY_ON, RELAY_ALLOW_DIRECT, RELAY = True, False, None
 NO_DIRECT = RELAY_ON and not RELAY_ALLOW_DIRECT      # 开了中转且不许直连：自检也不直连腾讯
+OFFLINE = os.environ.get("SELFTEST_OFFLINE") == "1"   # CI 打包时只跑离线检查，不访问任何接口
 
 
 def t_relay():
     from quotes import Fetcher, Searcher
+    if OFFLINE:
+        return "离线模式，跳过"
     if not RELAY:
         return "未配置中转，跳过"
     res = Fetcher(RELAY, allow_direct=False).fetch(["sh000001", "r_hkHSI"])
@@ -165,6 +168,8 @@ def t_relay():
 
 # ---------------------------------------------------------------- 7. 直连实时接口（需要联网）
 def t_live_quotes():
+    if OFFLINE:
+        return "离线模式，跳过"
     if NO_DIRECT:
         return "已开启中转且不允许直连：跳过直连测试"
     from quotes import Fetcher
@@ -177,6 +182,8 @@ def t_live_quotes():
 
 
 def t_live_search():
+    if OFFLINE:
+        return "离线模式，跳过"
     if NO_DIRECT:
         return "已开启中转且不允许直连：跳过直连测试"
     from quotes import Searcher

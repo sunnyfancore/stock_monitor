@@ -1,0 +1,71 @@
+# 盯盘小窗客户端：在 Windows 上自检 + 打包 StockWatcher.exe
+#
+# 推送客户端代码 → Actions 页面下载 exe（Artifacts）
+# 推送标签 v*（如 v2.0.0）→ 自动创建 Release 并附上 exe
+name: client-exe
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "*.py"
+      - "StockWatcher.spec"
+      - "icon.ico"
+      - ".github/workflows/client.yml"
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # 创建 Release 需要
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装打包工具
+        run: python -m pip install --upgrade pip "pyinstaller>=6.6"
+
+      - name: 自检（离线部分：语法、导入、解析、开盘时间）
+        env:
+          SELFTEST_OFFLINE: "1"
+        run: python selftest.py
+
+      - name: 打包 exe
+        run: python -m PyInstaller --noconfirm --clean StockWatcher.spec
+
+      - name: 大小与校验值
+        shell: pwsh
+        run: |
+          $f = Get-Item dist/StockWatcher.exe
+          $hash = (Get-FileHash $f -Algorithm SHA256).Hash
+          "### StockWatcher.exe" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          ("大小：{0:N1} MB" -f ($f.Length / 1MB)) | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "SHA256：$hash" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          "$hash  StockWatcher.exe" | Out-File -Encoding ascii dist/StockWatcher.exe.sha256
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: StockWatcher-${{ github.ref_name }}-${{ github.sha }}
+          path: |
+            dist/StockWatcher.exe
+            dist/StockWatcher.exe.sha256
+          retention-days: 30
+
+      - name: 发布 Release（仅推送 v* 标签时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/StockWatcher.exe
+            dist/StockWatcher.exe.sha256
+          generate_release_notes: true
