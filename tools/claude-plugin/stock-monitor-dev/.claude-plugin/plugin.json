@@ -1,5 +1,0 @@
-{
-  "name": "stock-monitor-dev",
-  "version": "1.0.0",
-  "description": "盯盘小窗开发辅助：Claude 每次编辑 .py 文件后，自动在本机做语法检查并运行 selftest.py 离线自检，失败时把错误反馈给 Claude"
-}
