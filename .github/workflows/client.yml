@@ -1,7 +1,7 @@
 # 盯盘小窗客户端：在 Windows 上自检 + 打包 StockWatcher.exe
 #
 # 推送客户端代码 → Actions 页面下载 exe（Artifacts）
-# 推送标签 v*（如 v2.0.0）→ 自动创建 Release 并附上 exe
+# 网页上新建 Release（标签 v 开头），或推送标签 v*（如 v2.0.0）→ 自动打包并把 exe 附到 Release
 name: client-exe
 
 on:
@@ -13,6 +13,8 @@ on:
       - "icon.ico"
       - ".github/workflows/client.yml"
     tags: ["v*"]
+  release:
+    types: [published]       # 在网页上新建 Release 时，自动打包并把 exe 挂上去
   workflow_dispatch:
 
 permissions:
